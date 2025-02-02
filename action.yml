@@ -54,25 +54,27 @@ runs:
           exit 1
         fi
 
-        # Get registry details
+        # Get registry details and clean URL
         ryvn get registry ryvn-registry -o json > registry.json
 
-        # Extract and validate registry details
+        # Extract and clean registry URL (remove https://)
+        registry_url=$(jq -r '.definition.url' registry.json | sed 's|^https://||')
+        if [ "$registry_url" = "null" ] || [ -z "$registry_url" ]; then
+          echo "Error: registry URL not found in registry definition"
+          exit 1
+        fi
+
+        # Extract and validate role ARN
         role_arn=$(jq -r '.definition.assumeRoleArn' registry.json)
         if [ "$role_arn" = "null" ] || [ -z "$role_arn" ]; then
           echo "Error: assumeRoleArn not found in registry definition"
           exit 1
         fi
 
+        # Extract and validate region
         region=$(jq -r '.definition.region' registry.json)
         if [ "$region" = "null" ] || [ -z "$region" ]; then
           echo "Error: region not found in registry definition"
-          exit 1
-        fi
-
-        registry_url=$(jq -r '.definition.url' registry.json)
-        if [ "$registry_url" = "null" ] || [ -z "$registry_url" ]; then
-          echo "Error: registry URL not found in registry definition"
           exit 1
         fi
 
