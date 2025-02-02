@@ -8,6 +8,12 @@ inputs:
   version:
     description: "Semantic version to tag the image with"
     required: true
+  ryvn_client_id:
+    description: "Ryvn Client ID for authentication"
+    required: true
+  ryvn_client_secret:
+    description: "Ryvn Client Secret for authentication"
+    required: true
 
 runs:
   using: "composite"
@@ -19,8 +25,8 @@ runs:
       id: service
       shell: bash
       env:
-        RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
-        RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
+        RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
+        RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
       run: |
         # Get service details
         ryvn get service ${{ inputs.service_name }} -o json > service.json
