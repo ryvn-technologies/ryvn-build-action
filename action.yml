@@ -8,6 +8,10 @@ inputs:
   version:
     description: "Semantic version to tag the image with"
     required: true
+  build_only:
+    description: "Build the image only, don't push it to registry"
+    required: false
+    default: "false"
   ryvn_client_id:
     description: "Ryvn Client ID for authentication"
     required: true
@@ -87,12 +91,14 @@ runs:
         echo "image_name=$image_name" >> $GITHUB_OUTPUT
 
     - name: Configure AWS credentials
+      if: inputs.build_only != 'true'
       uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ steps.service.outputs.role_arn }}
         aws-region: ${{ steps.service.outputs.region }}
 
     - name: Login to Amazon ECR
+      if: inputs.build_only != 'true'
       uses: aws-actions/amazon-ecr-login@v2
 
     - name: Extract Docker metadata
@@ -113,7 +119,7 @@ runs:
       with:
         context: ${{ steps.service.outputs.working_dir }}
         file: ${{ steps.service.outputs.dockerfile_path }}
-        push: true
+        push: ${{ inputs.build_only != 'true' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
