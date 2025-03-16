@@ -18,6 +18,9 @@ inputs:
   ryvn_client_secret:
     description: "Ryvn Client Secret for authentication"
     required: true
+  build_args:
+    description: "Build arguments to pass to the Docker build"
+    required: false
 
 runs:
   using: "composite"
@@ -122,6 +125,7 @@ runs:
         push: ${{ inputs.build_only != 'true' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
+        build-args: ${{ inputs.build_args }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
