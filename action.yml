@@ -62,7 +62,7 @@ runs:
         fi
 
         # Extract and validate orgId
-        org_id=$(jq -r '.definition.orgId' service.json)
+        org_id=$(jq -r '.orgId' service.json)
         if [ "$org_id" = "null" ] || [ -z "$org_id" ]; then
           echo "Error: orgId not found in service definition"
           exit 1
