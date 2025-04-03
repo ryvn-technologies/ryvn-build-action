@@ -61,29 +61,17 @@ runs:
           exit 1
         fi
 
-        # Get registry details and clean URL
-        ryvn get registry ryvn-registry -o json > registry.json
-
-        # Extract and clean registry URL (remove https://)
-        registry_url=$(jq -r '.definition.url' registry.json | sed 's|^https://||')
-        if [ "$registry_url" = "null" ] || [ -z "$registry_url" ]; then
-          echo "Error: registry URL not found in registry definition"
+        # Extract and validate orgId
+        org_id=$(jq -r '.definition.orgId' service.json)
+        if [ "$org_id" = "null" ] || [ -z "$org_id" ]; then
+          echo "Error: orgId not found in service definition"
           exit 1
         fi
 
-        # Extract and validate role ARN
-        role_arn=$(jq -r '.definition.assumeRoleArn' registry.json)
-        if [ "$role_arn" = "null" ] || [ -z "$role_arn" ]; then
-          echo "Error: assumeRoleArn not found in registry definition"
-          exit 1
-        fi
-
-        # Extract and validate region
-        region=$(jq -r '.definition.region' registry.json)
-        if [ "$region" = "null" ] || [ -z "$region" ]; then
-          echo "Error: region not found in registry definition"
-          exit 1
-        fi
+        # Set static registry values
+        registry_url="703671917981.dkr.ecr.us-east-1.amazonaws.com"
+        role_arn="arn:aws:iam::703671917981:role/${org_id}-github-actions"
+        region="us-east-1"
 
         # Set outputs
         echo "working_dir=$working_dir" >> $GITHUB_OUTPUT
