@@ -69,9 +69,9 @@ runs:
         fi
 
         # Extract and validate helm chart path
-        helm_chart_path=$(jq -r '.definition.build.helmChartPath' service.json)
+        helm_chart_path=$(jq -r '.definition.build.chartPath' service.json)
         if ([ "$helm_chart_path" = "null" ] || [ -z "$helm_chart_path" ]) && [ "$service_type" = "helm-chart.v1" ]; then
-          echo "Error: helmChartPath not found in service definition"
+          echo "Error: chartPath not found in service definition"
           exit 1
         fi
 
