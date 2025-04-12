@@ -49,35 +49,35 @@ runs:
 
         # Extract and validate working directory
         working_dir=$(jq -r '.definition.build.workingDir' service.json)
-        if { [ "$working_dir" = "null" ] || [ -z "$working_dir" ] } && [ "$service_type" == "web-server.v1" ]; then
+        if ([ "$working_dir" = "null" ] || [ -z "$working_dir" ]) && [ "$service_type" = "web-server.v1" ]; then
           echo "Error: working_dir not found in service definition"
           exit 1
         fi
 
         # Extract and validate dockerfile path
         dockerfile_path=$(jq -r '.definition.build.dockerfilePath' service.json)
-        if { [ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ] } && [ "$service_type" == "web-server.v1" ]; then
+        if ([ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]) && [ "$service_type" = "web-server.v1" ]; then
           echo "Error: dockerfile_path not found in service definition"
           exit 1
         fi
 
         # Extract and validate image name
         image_name=$(jq -r '.definition.imageName' service.json)
-        if { [ "$image_name" = "null" ] || [ -z "$image_name" ] } && [ "$service_type" == "web-server.v1" ]; then
+        if ([ "$image_name" = "null" ] || [ -z "$image_name" ]) && [ "$service_type" = "web-server.v1" ]; then
           echo "Error: imageName not found in service definition"
           exit 1
         fi
 
         # Extract and validate helm chart path
         helm_chart_path=$(jq -r '.definition.build.helmChartPath' service.json)
-        if { [ "$helm_chart_path" = "null" ] || [ -z "$helm_chart_path" ] } && [ "$service_type" == "helm-chart.v1" ]; then
+        if ([ "$helm_chart_path" = "null" ] || [ -z "$helm_chart_path" ]) && [ "$service_type" = "helm-chart.v1" ]; then
           echo "Error: helmChartPath not found in service definition"
           exit 1
         fi
 
         # Extract chart name
         chart_name=$(jq -r '.definition.build.chartName' service.json)
-        if { [ "$chart_name" = "null" ] || [ -z "$chart_name" ] } && [ "$service_type" == "helm-chart.v1" ]; then
+        if ([ "$chart_name" = "null" ] || [ -z "$chart_name" ]) && [ "$service_type" = "helm-chart.v1" ]; then
           echo "Error: chartName not found in service definition"
           exit 1
         fi
