@@ -1,15 +1,15 @@
-name: "Build and Push Image to Ryvn Registry"
-description: "Builds a Docker image and pushes it to Ryvn Registry"
+name: "Build and Push to Ryvn Registry"
+description: "Builds and pushes Docker images or Helm charts to Ryvn Registry"
 
 inputs:
   service_name:
     description: "Name of the service"
     required: true
   version:
-    description: "Semantic version to tag the image with"
+    description: "Semantic version to tag the image/chart with"
     required: true
   build_only:
-    description: "Build the image only, don't push it to registry"
+    description: "Build only, don't push to registry"
     required: false
     default: "false"
   ryvn_client_id:
@@ -40,24 +40,45 @@ runs:
 
         echo "Service details: $(cat service.json)"
 
+        # Extract and validate service type
+        service_type=$(jq -r '.definition.type' service.json)
+        if [ "$service_type" = "null" ] || [ -z "$service_type" ]; then
+          echo "Error: service type not found in service definition"
+          exit 1
+        fi
+
         # Extract and validate working directory
         working_dir=$(jq -r '.definition.build.workingDir' service.json)
-        if [ "$working_dir" = "null" ] || [ -z "$working_dir" ]; then
+        if { [ "$working_dir" = "null" ] || [ -z "$working_dir" ] } && [ "$service_type" == "web-server.v1" ]; then
           echo "Error: working_dir not found in service definition"
           exit 1
         fi
 
         # Extract and validate dockerfile path
         dockerfile_path=$(jq -r '.definition.build.dockerfilePath' service.json)
-        if [ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]; then
+        if { [ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ] } && [ "$service_type" == "web-server.v1" ]; then
           echo "Error: dockerfile_path not found in service definition"
           exit 1
         fi
 
         # Extract and validate image name
         image_name=$(jq -r '.definition.imageName' service.json)
-        if [ "$image_name" = "null" ] || [ -z "$image_name" ]; then
+        if { [ "$image_name" = "null" ] || [ -z "$image_name" ] } && [ "$service_type" == "web-server.v1" ]; then
           echo "Error: imageName not found in service definition"
+          exit 1
+        fi
+
+        # Extract and validate helm chart path
+        helm_chart_path=$(jq -r '.definition.build.helmChartPath' service.json)
+        if { [ "$helm_chart_path" = "null" ] || [ -z "$helm_chart_path" ] } && [ "$service_type" == "helm-chart.v1" ]; then
+          echo "Error: helmChartPath not found in service definition"
+          exit 1
+        fi
+
+        # Extract chart name
+        chart_name=$(jq -r '.definition.build.chartName' service.json)
+        if { [ "$chart_name" = "null" ] || [ -z "$chart_name" ] } && [ "$service_type" == "helm-chart.v1" ]; then
+          echo "Error: chartName not found in service definition"
           exit 1
         fi
 
@@ -74,6 +95,9 @@ runs:
         region="us-east-1"
 
         # Set outputs
+        echo "service_type=$service_type" >> $GITHUB_OUTPUT]
+        echo "helm_chart_path=$helm_chart_path" >> $GITHUB_OUTPUT
+        echo "chart_name=$chart_name" >> $GITHUB_OUTPUT
         echo "working_dir=$working_dir" >> $GITHUB_OUTPUT
         echo "dockerfile_path=$dockerfile_path" >> $GITHUB_OUTPUT
         echo "registry_url=$registry_url" >> $GITHUB_OUTPUT
@@ -92,7 +116,9 @@ runs:
       if: inputs.build_only != 'true'
       uses: aws-actions/amazon-ecr-login@v2
 
+    # Docker Image Steps
     - name: Extract Docker metadata
+      if: steps.service.outputs.service_type == 'web-server.v1'
       id: meta
       uses: docker/metadata-action@v5
       with:
@@ -103,9 +129,11 @@ runs:
           type=ref,event=pr
 
     - name: Set up Docker Buildx
+      if: steps.service.outputs.service_type == 'web-server.v1'
       uses: docker/setup-buildx-action@v3
 
     - name: Build and push Docker image
+      if: steps.service.outputs.service_type == 'web-server.v1'
       uses: docker/build-push-action@v5
       with:
         context: ${{ steps.service.outputs.working_dir }}
@@ -116,6 +144,26 @@ runs:
         build-args: ${{ inputs.build_args }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+
+    # Helm Chart Steps
+    - name: Install Helm
+      if: steps.service.outputs.service_type == 'helm-chart.v1'
+      uses: azure/setup-helm@v3
+      with:
+        version: v3.12.1
+
+    - name: Package Helm Chart
+      if: steps.service.outputs.service_type == 'helm-chart.v1'
+      shell: bash
+      run: |
+        cd ${{ steps.service.outputs.helm_chart_path }}
+        helm package . --version ${{ inputs.version }}
+
+    - name: Push Helm Chart to Registry
+      if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
+      shell: bash
+      run: |
+        helm push ${{ steps.service.outputs.chart_name }}-${{ inputs.version }}.tgz oci://${{ steps.service.outputs.registry_url }}/helm-charts
 
 branding:
   icon: "package"
