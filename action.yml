@@ -76,7 +76,7 @@ runs:
         fi
 
         # Extract chart name
-        chart_name=$(jq -r '.definition.build.chartName' service.json)
+        chart_name=$(jq -r '.definition.chartName' service.json)
         if ([ "$chart_name" = "null" ] || [ -z "$chart_name" ]) && [ "$service_type" = "helm-chart.v1" ]; then
           echo "Error: chartName not found in service definition"
           exit 1
