@@ -95,7 +95,7 @@ runs:
         region="us-east-1"
 
         # Set outputs
-        echo "service_type=$service_type" >> $GITHUB_OUTPUT]
+        echo "service_type=$service_type" >> $GITHUB_OUTPUT
         echo "helm_chart_path=$helm_chart_path" >> $GITHUB_OUTPUT
         echo "chart_name=$chart_name" >> $GITHUB_OUTPUT
         echo "working_dir=$working_dir" >> $GITHUB_OUTPUT
