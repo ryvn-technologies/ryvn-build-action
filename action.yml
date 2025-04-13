@@ -165,6 +165,12 @@ runs:
       run: |
         helm package ${{ steps.service.outputs.helm_chart_path }} --version ${{ inputs.version }}
 
+    - name: Login to Helm Registry
+      if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
+      shell: bash
+      run: |
+        aws ecr get-login-password --region ${{ steps.service.outputs.region }} | helm registry login --username AWS --password-stdin ${{ steps.service.outputs.registry_url }}
+
     - name: Push Helm Chart to Registry
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
       shell: bash
