@@ -165,12 +165,14 @@ runs:
       run: |
         cd ${{ steps.service.outputs.helm_chart_path }}
         helm package . --version ${{ inputs.version }}
+        # Store the full path of the packaged chart
+        echo "chart_path=$(pwd)/${{ steps.service.outputs.chart_name }}-${{ inputs.version }}.tgz" >> $GITHUB_OUTPUT
 
     - name: Push Helm Chart to Registry
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
       shell: bash
       run: |
-        helm push ${{ steps.service.outputs.chart_name }}-${{ inputs.version }}.tgz oci://${{ steps.service.outputs.chart_repo }}/${{ steps.service.outputs.chart_name }}
+        helm push ${{ steps.package.outputs.chart_path }} oci://${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.chart_repo }}/${{ steps.service.outputs.chart_name }}
 
 branding:
   icon: "package"
