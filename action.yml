@@ -82,6 +82,12 @@ runs:
           exit 1
         fi
 
+        chart_repo=$(jq -r '.definition.chartRepository' service.json)
+        if ([ "$chart_repo" = "null" ] || [ -z "$chart_repo" ]) && [ "$service_type" = "helm-chart.v1" ]; then
+          echo "Error: chartRepository not found in service definition"
+          exit 1
+        fi
+
         # Extract and validate orgId
         org_id=$(jq -r '.orgId' service.json)
         if [ "$org_id" = "null" ] || [ -z "$org_id" ]; then
@@ -98,6 +104,7 @@ runs:
         echo "service_type=$service_type" >> $GITHUB_OUTPUT
         echo "helm_chart_path=$helm_chart_path" >> $GITHUB_OUTPUT
         echo "chart_name=$chart_name" >> $GITHUB_OUTPUT
+        echo "chart_repo=$chart_repo" >> $GITHUB_OUTPUT
         echo "working_dir=$working_dir" >> $GITHUB_OUTPUT
         echo "dockerfile_path=$dockerfile_path" >> $GITHUB_OUTPUT
         echo "registry_url=$registry_url" >> $GITHUB_OUTPUT
@@ -163,7 +170,7 @@ runs:
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
       shell: bash
       run: |
-        helm push ${{ steps.service.outputs.chart_name }}-${{ inputs.version }}.tgz oci://${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}
+        helm push ${{ steps.service.outputs.chart_name }}-${{ inputs.version }}.tgz oci://${{ steps.service.outputs.chart_repo }}/${{ steps.service.outputs.chart_name }}
 
 branding:
   icon: "package"
