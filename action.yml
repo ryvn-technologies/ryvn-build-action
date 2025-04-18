@@ -149,8 +149,8 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ inputs.build_args }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: type=gha,scope=${{ inputs.service_name }}
+        cache-to: type=gha,mode=max,scope=${{ inputs.service_name }}
 
     # Helm Chart Steps
     - name: Install Helm
