@@ -149,8 +149,19 @@ runs:
       with:
         version: latest
 
-    - name: Build and push Docker image
-      if: steps.service.outputs.service_type == 'web-server.v1'
+    - name: Build and push Docker image (Blacksmith)
+      if: steps.service.outputs.service_type == 'web-server.v1' && startsWith(runner.name, 'blacksmith')
+      uses: useblacksmith/build-push-action@v1
+      with:
+        context: ${{ steps.service.outputs.working_dir }}
+        file: ${{ steps.service.outputs.dockerfile_path }}
+        push: ${{ inputs.build_only != 'true' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        build-args: ${{ inputs.build_args }}
+
+    - name: Build and push Docker image (Docker)
+      if: steps.service.outputs.service_type == 'web-server.v1' && !startsWith(runner.name, 'blacksmith')
       uses: docker/build-push-action@v5
       with:
         context: ${{ steps.service.outputs.working_dir }}
