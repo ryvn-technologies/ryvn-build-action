@@ -21,6 +21,22 @@ inputs:
   build_args:
     description: "Build arguments to pass to the Docker build"
     required: false
+  use_nixpacks:
+    description: "Use Nixpacks to build Docker images instead of Dockerfile"
+    required: false
+    default: "false"
+  nixpacks_pkgs:
+    description: "Additional Nix packages to install in the environment"
+    required: false
+    default: ""
+  nixpacks_apt:
+    description: "Additional Apt packages to install in the environment"
+    required: false
+    default: ""
+  nixpacks_cache:
+    description: "Use the Nixpacks build cache"
+    required: false
+    default: "true"
 
 runs:
   using: "composite"
@@ -64,7 +80,7 @@ runs:
 
         # Extract and validate dockerfile path
         dockerfile_path=$(jq -r '.definition.build.dockerfilePath' service.json)
-        if ([ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]) && [ "$service_type" = "web-server.v1" ]; then
+        if ([ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]) && [ "$service_type" = "web-server.v1" ] && [ "${{ inputs.use_nixpacks }}" != "true" ]; then
           echo "Error: dockerfile_path not found in service definition"
           exit 1
         fi
@@ -143,14 +159,31 @@ runs:
           type=sha
           type=ref,event=pr
 
+    # Nixpacks Build and Push
+    - name: Build and push with Nixpacks
+      if: steps.service.outputs.service_type == 'web-server.v1' && inputs.use_nixpacks == 'true'
+      uses: iloveitaly/github-action-nixpacks@main
+      with:
+        context: ${{ steps.service.outputs.working_dir }}
+        push: ${{ inputs.build_only != 'true' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        platforms: "linux/amd64"
+        pkgs: ${{ inputs.nixpacks_pkgs }}
+        apt: ${{ inputs.nixpacks_apt }}
+        cache: ${{ inputs.nixpacks_cache }}
+        cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
+        env: ${{ inputs.build_args }}
+
+    # Standard Docker Build Steps - only run if not using Nixpacks
     - name: Set up Docker Buildx
-      if: steps.service.outputs.service_type == 'web-server.v1'
+      if: steps.service.outputs.service_type == 'web-server.v1' && inputs.use_nixpacks != 'true'
       uses: docker/setup-buildx-action@v3
       with:
         version: latest
 
     - name: Build and push Docker image (Blacksmith)
-      if: steps.service.outputs.service_type == 'web-server.v1' && startsWith(runner.name, 'blacksmith')
+      if: steps.service.outputs.service_type == 'web-server.v1' && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true'
       uses: useblacksmith/build-push-action@v1
       with:
         context: ${{ steps.service.outputs.working_dir }}
@@ -161,7 +194,7 @@ runs:
         build-args: ${{ inputs.build_args }}
 
     - name: Build and push Docker image (Docker)
-      if: steps.service.outputs.service_type == 'web-server.v1' && !startsWith(runner.name, 'blacksmith')
+      if: steps.service.outputs.service_type == 'web-server.v1' && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true'
       uses: docker/build-push-action@v5
       with:
         context: ${{ steps.service.outputs.working_dir }}
