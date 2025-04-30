@@ -85,9 +85,10 @@ runs:
           exit 1
         fi
 
-        # Extract build args from service definition and convert to multi-line format
-        service_build_args=$(jq -r '.definition.build.dockerBuildArgs | to_entries | map("\(.key)=\(.value)") | join("\n")' service.json)
-        if [ "$service_build_args" != "null" ] && [ -n "$service_build_args" ]; then
+        # Check if dockerBuildArgs exists and is not null
+        if [ "$(jq -r '.definition.build.dockerBuildArgs != null' service.json)" = "true" ]; then
+          # Extract and convert build args to multi-line format
+          service_build_args=$(jq -r '.definition.build.dockerBuildArgs | to_entries | map("\(.key)=\(.value)") | join("\n")' service.json)
           # If workflow build args are not specified, use service build args
           if [ -z "${{ inputs.build_args }}" ]; then
             echo "Using build args from service definition"
@@ -190,7 +191,7 @@ runs:
         apt: ${{ inputs.nixpacks_apt }}
         cache: ${{ inputs.nixpacks_cache }}
         cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
-        env: ${{ inputs.build_args }}
+        env: ${{ steps.service.outputs.build_args }}
 
     # Standard Docker Build Steps - only run if not using Nixpacks
     - name: Set up Docker Buildx
@@ -208,7 +209,7 @@ runs:
         push: ${{ inputs.build_only != 'true' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        build-args: ${{ inputs.build_args }}
+        build-args: ${{ steps.service.outputs.build_args }}
 
     - name: Build and push Docker image (Docker)
       if: steps.service.outputs.service_type == 'web-server.v1' && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true'
@@ -219,7 +220,7 @@ runs:
         push: ${{ inputs.build_only != 'true' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        build-args: ${{ inputs.build_args }}
+        build-args: ${{ steps.service.outputs.build_args }}
         cache-from: type=gha,scope=${{ inputs.service_name }}
         cache-to: type=gha,mode=max,scope=${{ inputs.service_name }}
 
