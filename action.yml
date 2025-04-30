@@ -85,6 +85,23 @@ runs:
           exit 1
         fi
 
+        # Extract build args from service definition and convert to multi-line format
+        service_build_args=$(jq -r '.definition.build.dockerBuildArgs | to_entries | map("\(.key)=\(.value)") | join("\n")' service.json)
+        if [ "$service_build_args" != "null" ] && [ -n "$service_build_args" ]; then
+          # If workflow build args are not specified, use service build args
+          if [ -z "${{ inputs.build_args }}" ]; then
+            echo "Using build args from service definition"
+            echo "build_args<<EOF" >> $GITHUB_OUTPUT
+            echo "$service_build_args" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "Using build args from workflow input"
+            echo "build_args=${{ inputs.build_args }}" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "build_args=${{ inputs.build_args }}" >> $GITHUB_OUTPUT
+        fi
+
         # Extract and validate image name
         image_name=$(jq -r '.definition.imageName' service.json)
         if ([ "$image_name" = "null" ] || [ -z "$image_name" ]) && [ "$service_type" = "web-server.v1" ]; then
