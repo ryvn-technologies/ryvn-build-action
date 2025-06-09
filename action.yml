@@ -245,6 +245,7 @@ runs:
 
     - name: Push Helm Chart to Registry
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
+      working-directory: ${{ steps.service.outputs.helm_chart_path }}
       shell: bash
       run: |
         helm push ${{ steps.service.outputs.chart_name }}-${{ inputs.version }}.tgz oci://${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.chart_repo }}
