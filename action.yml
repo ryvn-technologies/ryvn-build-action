@@ -21,6 +21,10 @@ inputs:
   build_args:
     description: "Build arguments to pass to the Docker build"
     required: false
+  platforms:
+    description: "List of target platforms for build"
+    required: false
+    default: "linux/amd64"
   use_nixpacks:
     description: "Use Nixpacks to build Docker images instead of Dockerfile"
     required: false
@@ -186,7 +190,7 @@ runs:
         push: ${{ inputs.build_only != 'true' }}
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
-        platforms: "linux/amd64"
+        platforms: ${{ inputs.platforms }}
         pkgs: ${{ inputs.nixpacks_pkgs }}
         apt: ${{ inputs.nixpacks_apt }}
         cache: ${{ inputs.nixpacks_cache }}
@@ -210,6 +214,7 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ steps.service.outputs.build_args }}
+        platforms: ${{ inputs.platforms }}
 
     - name: Build and push Docker image (Docker)
       if: steps.service.outputs.service_type == 'web-server.v1' && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true'
@@ -223,6 +228,7 @@ runs:
         build-args: ${{ steps.service.outputs.build_args }}
         cache-from: type=gha,scope=${{ inputs.service_name }}
         cache-to: type=gha,mode=max,scope=${{ inputs.service_name }}
+        platforms: ${{ inputs.platforms }}
 
     # Helm Chart Steps
     - name: Install Helm
