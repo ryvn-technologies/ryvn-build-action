@@ -41,6 +41,10 @@ inputs:
     description: "Use the Nixpacks build cache"
     required: false
     default: "true"
+  nixpacks_build_cmd:
+    description: "Custom build command for Nixpacks"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -185,6 +189,8 @@ runs:
     - name: Build and push with Nixpacks
       if: steps.service.outputs.service_type == 'web-server.v1' && inputs.use_nixpacks == 'true'
       uses: iloveitaly/github-action-nixpacks@main
+      env:
+        NIXPACKS_BUILD_CMD: ${{ inputs.nixpacks_build_cmd }}
       with:
         context: ${{ steps.service.outputs.working_dir }}
         push: ${{ inputs.build_only != 'true' }}
