@@ -193,12 +193,28 @@ runs:
           type=sha
           type=ref,event=pr
 
-    # Nixpacks Build and Push
-    - name: Build and push with Nixpacks
-      if: steps.service.outputs.service_type == 'web-server.v1' && (inputs.use_nixpacks == 'true' || steps.service.outputs.use_nixpacks_from_service == 'true')
+    # Nixpacks Build and Push (with build command)
+    - name: Build and push with Nixpacks (with build command)
+      if: steps.service.outputs.service_type == 'web-server.v1' && (inputs.use_nixpacks == 'true' || steps.service.outputs.use_nixpacks_from_service == 'true') && steps.service.outputs.build_command != ''
       uses: iloveitaly/github-action-nixpacks@main
       env:
         NIXPACKS_BUILD_CMD: ${{ steps.service.outputs.build_command }}
+      with:
+        context: ${{ steps.service.outputs.working_dir }}
+        push: ${{ inputs.build_only != 'true' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        platforms: ${{ inputs.platforms }}
+        pkgs: ${{ inputs.nixpacks_pkgs }}
+        apt: ${{ inputs.nixpacks_apt }}
+        cache: ${{ inputs.nixpacks_cache }}
+        cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
+        env: ${{ steps.service.outputs.build_args }}
+
+    # Nixpacks Build and Push (without build command)
+    - name: Build and push with Nixpacks (without build command)
+      if: steps.service.outputs.service_type == 'web-server.v1' && (inputs.use_nixpacks == 'true' || steps.service.outputs.use_nixpacks_from_service == 'true') && steps.service.outputs.build_command == ''
+      uses: iloveitaly/github-action-nixpacks@main
       with:
         context: ${{ steps.service.outputs.working_dir }}
         push: ${{ inputs.build_only != 'true' }}
