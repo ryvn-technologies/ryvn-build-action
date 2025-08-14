@@ -8,6 +8,7 @@ This GitHub Action builds and pushes Docker images or Helm charts to the Ryvn Re
 
 - Docker images built from Dockerfiles
 - Docker images built using Nixpacks (without Dockerfile)
+- Automatic Nixpacks detection from service configuration
 - Helm charts
 
 ## Usage
@@ -77,6 +78,28 @@ jobs:
           ryvn_client_secret: ${{ secrets.RYVN_CLIENT_SECRET }}
 ```
 
+### Automatic Nixpacks Detection
+
+When your service is configured with `buildpack: "nixpack"` in the Ryvn service definition, the action will automatically use Nixpacks without needing to set `use_nixpacks: true`:
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Build with Auto-detected Nixpacks
+        uses: ryvn-technologies/ryvn-build-action@v1
+        with:
+          service_name: nixpack-test # Service configured with buildpack: "nixpack"
+          version: 1.0.0
+          ryvn_client_id: ${{ secrets.RYVN_CLIENT_ID }}
+          ryvn_client_secret: ${{ secrets.RYVN_CLIENT_SECRET }}
+```
+
+The action will automatically use the build command from your service definition (e.g., `npm install -g pnpm@9.0.2 && cd apps/cronjob && pnpm i && pnpm run build`).
+
 ### Building a Helm Chart
 
 ```yaml
@@ -101,9 +124,26 @@ This action:
 
 1. Installs the Ryvn CLI
 2. Retrieves service configuration from Ryvn API
-3. Authenticates with AWS ECR
-4. Builds the Docker image or packages the Helm chart
-5. Pushes to the Ryvn Registry (unless `build_only` is set to true)
+3. Automatically detects build method:
+   - If `buildpack: "nixpack"` is set in service definition, uses Nixpacks with the service's build command
+   - If `use_nixpacks: true` is provided as input, uses Nixpacks
+   - Otherwise uses standard Docker build with Dockerfile
+4. Authenticates with AWS ECR
+5. Builds the Docker image or packages the Helm chart
+6. Pushes to the Ryvn Registry (unless `build_only` is set to true)
+
+## Nixpacks Configuration
+
+The action supports two ways to use Nixpacks:
+
+1. **Manual**: Set `use_nixpacks: true` in your workflow
+2. **Automatic**: Configure your service with `buildpack: "nixpack"` in the Ryvn service definition
+
+When using automatic detection, the action will:
+
+- Extract the `build.command` from your service definition
+- Use it as the `NIXPACKS_BUILD_CMD` environment variable
+- Build with Nixpacks using your service's specific build command
 
 ## License
 
