@@ -82,16 +82,16 @@ runs:
           exit 1
         fi
 
-        # Extract and validate dockerfile path
+        # Extract build command and buildpack for nixpacks first
+        build_command=$(jq -r '.definition.build.command' service.json)
+        buildpack=$(jq -r '.definition.build.buildpack' service.json)
+        
+        # Extract and validate dockerfile path (only required if not using buildpack/nixpacks)
         dockerfile_path=$(jq -r '.definition.build.dockerfilePath' service.json)
-        if ([ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]) && [ "$service_type" = "web-server.v1" ] && [ "${{ inputs.use_nixpacks }}" != "true" ]; then
+        if ([ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]) && [ "$service_type" = "web-server.v1" ] && [ "${{ inputs.use_nixpacks }}" != "true" ] && [ "$buildpack" != "nixpack" ]; then
           echo "Error: dockerfile_path not found in service definition"
           exit 1
         fi
-
-        # Extract build command and buildpack for nixpacks
-        build_command=$(jq -r '.definition.build.command' service.json)
-        buildpack=$(jq -r '.definition.build.buildpack' service.json)
         
         # Check if service should use nixpacks
         use_nixpacks_from_service="false"
