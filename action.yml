@@ -85,14 +85,14 @@ runs:
         # Extract build command and buildpack for nixpacks first
         build_command=$(jq -r '.definition.build.command // ""' service.json)
         buildpack=$(jq -r '.definition.build.buildpack' service.json)
-        
+
         # Extract and validate dockerfile path (only required if not using buildpack/nixpacks)
         dockerfile_path=$(jq -r '.definition.build.dockerfilePath' service.json)
         if ([ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]) && ([ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]) && [ "${{ inputs.use_nixpacks }}" != "true" ] && [ "$buildpack" != "nixpack" ]; then
           echo "Error: dockerfile_path not found in service definition"
           exit 1
         fi
-        
+
         # Check if service should use nixpacks
         use_nixpacks_from_service="false"
         if [ "$buildpack" = "nixpack" ]; then
@@ -207,7 +207,7 @@ runs:
         apt: ${{ inputs.nixpacks_apt }}
         cache: ${{ inputs.nixpacks_cache }}
         cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
-        env: NIXPACKS_BUILD_CMD=${{ steps.service.outputs.build_command }}
+        env: NIXPACKS_BUILD_CMD="${{ steps.service.outputs.build_command }}"
 
     # Nixpacks Build and Push (without build command)
     - name: Build and push with Nixpacks (without build command)
