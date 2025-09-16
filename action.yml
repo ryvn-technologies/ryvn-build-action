@@ -268,8 +268,8 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ steps.service.outputs.build_args }}
-        cache-from: ${{ inputs.disable_cache == 'true' && '' || format('type=gha,scope={0}', inputs.service_name) }}
-        cache-to: ${{ inputs.disable_cache == 'true' && '' || format('type=gha,mode=max,scope={0}', inputs.service_name) }}
+        cache-from: ${{ inputs.disable_cache != 'true' && format('type=gha,scope={0}', inputs.service_name) || '' }}
+        cache-to: ${{ inputs.disable_cache != 'true' && format('type=gha,mode=max,scope={0}', inputs.service_name) || '' }}
         platforms: ${{ inputs.platforms }}
 
     # Helm Chart Steps
