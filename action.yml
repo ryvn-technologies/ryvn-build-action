@@ -41,6 +41,14 @@ inputs:
     description: "Use the Nixpacks build cache"
     required: false
     default: "true"
+  buildx_endpoint:
+    description: "Docker Buildx endpoint for remote driver"
+    required: false
+    default: ""
+  buildx_driver:
+    description: "Docker Buildx driver type"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -231,6 +239,8 @@ runs:
       uses: docker/setup-buildx-action@v3
       with:
         version: latest
+        endpoint: ${{ inputs.buildx_endpoint }}
+        driver: ${{ inputs.buildx_driver }}
 
     - name: Build and push Docker image (Blacksmith)
       if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
