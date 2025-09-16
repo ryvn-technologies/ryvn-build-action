@@ -49,6 +49,10 @@ inputs:
     description: "Docker Buildx driver type"
     required: false
     default: ""
+  disable_cache:
+    description: "Disable all caching (GitHub Actions cache and build cache)"
+    required: false
+    default: "false"
 
 runs:
   using: "composite"
@@ -213,7 +217,7 @@ runs:
         platforms: ${{ inputs.platforms }}
         pkgs: ${{ inputs.nixpacks_pkgs }}
         apt: ${{ inputs.nixpacks_apt }}
-        cache: ${{ inputs.nixpacks_cache }}
+        cache: ${{ inputs.disable_cache == 'true' && 'false' || inputs.nixpacks_cache }}
         cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
         env: NIXPACKS_BUILD_CMD="${{ steps.service.outputs.build_command }}"
 
@@ -229,7 +233,7 @@ runs:
         platforms: ${{ inputs.platforms }}
         pkgs: ${{ inputs.nixpacks_pkgs }}
         apt: ${{ inputs.nixpacks_apt }}
-        cache: ${{ inputs.nixpacks_cache }}
+        cache: ${{ inputs.disable_cache == 'true' && 'false' || inputs.nixpacks_cache }}
         cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
         env: ${{ steps.service.outputs.build_args }}
 
@@ -264,8 +268,8 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ steps.service.outputs.build_args }}
-        cache-from: type=gha,scope=${{ inputs.service_name }}
-        cache-to: type=gha,mode=max,scope=${{ inputs.service_name }}
+        cache-from: ${{ inputs.disable_cache == 'true' && '' || format('type=gha,scope={0}', inputs.service_name) }}
+        cache-to: ${{ inputs.disable_cache == 'true' && '' || format('type=gha,mode=max,scope={0}', inputs.service_name) }}
         platforms: ${{ inputs.platforms }}
 
     # Helm Chart Steps
