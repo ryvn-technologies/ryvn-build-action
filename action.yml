@@ -163,10 +163,85 @@ runs:
           exit 1
         fi
 
-        # Set static registry values
-        registry_url="703671917981.dkr.ecr.us-east-1.amazonaws.com"
-        role_arn="arn:aws:iam::703671917981:role/${org_id}-github-actions"
-        region="us-east-1"
+        # Extract registry from service definition
+        registry_name=$(jq -r '.definition.registry // "ryvn-registry"' service.json)
+
+        # Determine registry URL and credentials based on registry name
+        if [ "$registry_name" = "ryvn-registry" ] || [ "$registry_name" = "null" ] || [ -z "$registry_name" ]; then
+          # Use default hardcoded registry for ryvn-registry
+          echo "Using default ryvn-registry"
+          registry_type="elasticContainerRegistry"
+          registry_url="703671917981.dkr.ecr.us-east-1.amazonaws.com"
+          role_arn="arn:aws:iam::703671917981:role/${org_id}-github-actions"
+          region="us-east-1"
+          registry_username=""
+          registry_password=""
+        else
+          # Fetch registry details from Ryvn API
+          echo "Fetching registry details for: $registry_name"
+          ryvn get registry "$registry_name" -o json > registry.json
+
+          echo "Registry details: $(cat registry.json)"
+
+          # Extract registry type
+          registry_type=$(jq -r '.definition.type' registry.json)
+          if [ "$registry_type" = "null" ] || [ -z "$registry_type" ]; then
+            echo "Error: Registry type not found for registry: $registry_name"
+            exit 1
+          fi
+
+          # Extract registry URL
+          registry_url=$(jq -r '.definition.url' registry.json)
+          if [ "$registry_url" = "null" ] || [ -z "$registry_url" ]; then
+            echo "Error: Registry URL not found for registry: $registry_name"
+            exit 1
+          fi
+
+          # Extract credentials based on registry type
+          if [ "$registry_type" = "elasticContainerRegistry" ]; then
+            # ECR registry - extract role ARN and region
+            role_arn=$(jq -r '.definition.credentials.roleArn' registry.json)
+            if [ "$role_arn" = "null" ] || [ -z "$role_arn" ]; then
+              echo "Error: Role ARN not found for ECR registry: $registry_name"
+              exit 1
+            fi
+
+            region=$(jq -r '.definition.region' registry.json)
+            if [ "$region" = "null" ] || [ -z "$region" ]; then
+              echo "Error: Region not found for ECR registry: $registry_name"
+              exit 1
+            fi
+
+            registry_username=""
+            registry_password=""
+
+            echo "Using ECR registry: $registry_name"
+            echo "Registry URL: $registry_url"
+            echo "Region: $region"
+          elif [ "$registry_type" = "genericContainerRegistry" ]; then
+            # Generic registry - extract basic auth credentials
+            registry_username=$(jq -r '.definition.credentials.username' registry.json)
+            if [ "$registry_username" = "null" ] || [ -z "$registry_username" ]; then
+              echo "Error: Username not found for generic registry: $registry_name"
+              exit 1
+            fi
+
+            registry_password=$(jq -r '.definition.credentials.password' registry.json)
+            if [ "$registry_password" = "null" ] || [ -z "$registry_password" ]; then
+              echo "Error: Password not found for generic registry: $registry_name"
+              exit 1
+            fi
+
+            role_arn=""
+            region=""
+
+            echo "Using generic container registry: $registry_name"
+            echo "Registry URL: $registry_url"
+          else
+            echo "Error: Unknown registry type: $registry_type"
+            exit 1
+          fi
+        fi
 
         # Set outputs
         echo "service_type=$service_type" >> $GITHUB_OUTPUT
@@ -175,23 +250,34 @@ runs:
         echo "chart_repo=$chart_repo" >> $GITHUB_OUTPUT
         echo "working_dir=$working_dir" >> $GITHUB_OUTPUT
         echo "dockerfile_path=$dockerfile_path" >> $GITHUB_OUTPUT
+        echo "registry_type=$registry_type" >> $GITHUB_OUTPUT
         echo "registry_url=$registry_url" >> $GITHUB_OUTPUT
         echo "role_arn=$role_arn" >> $GITHUB_OUTPUT
         echo "region=$region" >> $GITHUB_OUTPUT
+        echo "registry_username=$registry_username" >> $GITHUB_OUTPUT
+        echo "registry_password=$registry_password" >> $GITHUB_OUTPUT
         echo "image_name=$image_name" >> $GITHUB_OUTPUT
         echo "build_command=$build_command" >> $GITHUB_OUTPUT
         echo "use_nixpacks_from_service=$use_nixpacks_from_service" >> $GITHUB_OUTPUT
 
     - name: Configure AWS credentials
-      if: inputs.build_only != 'true'
+      if: inputs.build_only != 'true' && steps.service.outputs.registry_type == 'elasticContainerRegistry'
       uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ steps.service.outputs.role_arn }}
         aws-region: ${{ steps.service.outputs.region }}
 
     - name: Login to Amazon ECR
-      if: inputs.build_only != 'true'
+      if: inputs.build_only != 'true' && steps.service.outputs.registry_type == 'elasticContainerRegistry'
       uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Login to Generic Container Registry
+      if: inputs.build_only != 'true' && steps.service.outputs.registry_type == 'genericContainerRegistry'
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ steps.service.outputs.registry_url }}
+        username: ${{ steps.service.outputs.registry_username }}
+        password: ${{ steps.service.outputs.registry_password }}
 
     # Docker Image Steps
     - name: Extract Docker metadata
@@ -289,11 +375,17 @@ runs:
       run: |
         helm package ${{ steps.service.outputs.helm_chart_path }} --version ${{ inputs.version }}
 
-    - name: Login to Helm Registry
-      if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
+    - name: Login to Helm Registry (ECR)
+      if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true' && steps.service.outputs.registry_type == 'elasticContainerRegistry'
       shell: bash
       run: |
         aws ecr get-login-password --region ${{ steps.service.outputs.region }} | helm registry login --username AWS --password-stdin ${{ steps.service.outputs.registry_url }}
+
+    - name: Login to Helm Registry (Generic)
+      if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true' && steps.service.outputs.registry_type == 'genericContainerRegistry'
+      shell: bash
+      run: |
+        echo "${{ steps.service.outputs.registry_password }}" | helm registry login --username ${{ steps.service.outputs.registry_username }} --password-stdin ${{ steps.service.outputs.registry_url }}
 
     - name: Push Helm Chart to Registry
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
