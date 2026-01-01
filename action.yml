@@ -21,6 +21,9 @@ inputs:
   ryvn_api_url:
     description: "Ryvn API URL for self-hosted or dev instances (optional)"
     required: false
+  ryvn_auth_url:
+    description: "Ryvn Auth URL for self-hosted or dev instances (optional)"
+    required: false
   build_args:
     description: "Build arguments to pass to the Docker build"
     required: false
@@ -81,6 +84,11 @@ runs:
         # Set RYVN_API_URL only if provided
         if [ -n "${{ inputs.ryvn_api_url }}" ]; then
           export RYVN_API_URL="${{ inputs.ryvn_api_url }}"
+        fi
+
+        # Set RYVN_AUTH_URL only if provided
+        if [ -n "${{ inputs.ryvn_auth_url }}" ]; then
+          export RYVN_AUTH_URL="${{ inputs.ryvn_auth_url }}"
         fi
 
         # Get service details
