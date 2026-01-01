@@ -18,6 +18,9 @@ inputs:
   ryvn_client_secret:
     description: "Ryvn Client Secret for authentication"
     required: true
+  ryvn_api_url:
+    description: "Ryvn API URL for self-hosted or dev instances (optional)"
+    required: false
   build_args:
     description: "Build arguments to pass to the Docker build"
     required: false
@@ -75,6 +78,11 @@ runs:
         RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
         RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
       run: |
+        # Set RYVN_API_URL only if provided
+        if [ -n "${{ inputs.ryvn_api_url }}" ]; then
+          export RYVN_API_URL="${{ inputs.ryvn_api_url }}"
+        fi
+
         # Get service details
         ryvn get service ${{ inputs.service_name }} -o json > service.json
 
