@@ -80,7 +80,6 @@ runs:
       env:
         RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
         RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
-        GH_TOKEN: ${{ github.token }}
       run: |
         # Set RYVN_API_URL only if provided
         if [ -n "${{ inputs.ryvn_api_url }}" ]; then
@@ -133,9 +132,8 @@ runs:
           # Extract and convert build args to multi-line format
           service_build_args=$(jq -r '.definition.build.dockerBuildArgs | to_entries | map("\(.key)=\(.value)") | join("\n")' service.json)
 
-          # Resolve well-known variable references in build args
-          service_build_args=$(echo "$service_build_args" | sed "s|\${GITHUB_TOKEN}|${GH_TOKEN}|g")
-          service_build_args=$(echo "$service_build_args" | sed "s|\${GITHUB_ACTOR}|${GITHUB_ACTOR}|g")
+          # Resolve ${VAR} references in build args from environment variables
+          service_build_args=$(echo "$service_build_args" | envsubst)
 
           # If workflow build args are not specified, use service build args
           if [ -z "${{ inputs.build_args }}" ]; then
