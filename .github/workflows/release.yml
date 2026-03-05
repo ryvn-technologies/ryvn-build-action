@@ -1,0 +1,204 @@
+name: Ryvn Build & Release
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Name of the service"
+        required: true
+        type: string
+      runner:
+        description: "Runner label as JSON array (e.g. '[\"ubuntu-latest\"]', '[\"self-hosted\", \"linux\"]')"
+        required: false
+        type: string
+        default: '["ubuntu-latest"]'
+      build_args:
+        description: "Build arguments to pass to the Docker build"
+        required: false
+        type: string
+        default: ""
+      platforms:
+        description: "Target platforms for Docker build"
+        required: false
+        type: string
+        default: "linux/amd64"
+      use_nixpacks:
+        description: "Use Nixpacks instead of Dockerfile"
+        required: false
+        type: boolean
+        default: false
+      nixpacks_pkgs:
+        description: "Additional Nix packages to install"
+        required: false
+        type: string
+        default: ""
+      nixpacks_apt:
+        description: "Additional Apt packages to install"
+        required: false
+        type: string
+        default: ""
+      disable_cache:
+        description: "Disable all build caching"
+        required: false
+        type: boolean
+        default: false
+      ryvn_api_url:
+        description: "Ryvn API URL (for self-hosted or dev instances)"
+        required: false
+        type: string
+        default: ""
+      ryvn_auth_url:
+        description: "Ryvn Auth URL (for self-hosted or dev instances)"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      RYVN_CLIENT_ID:
+        required: true
+      RYVN_CLIENT_SECRET:
+        required: true
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Ryvn CLI
+        uses: ryvn-technologies/install-ryvn-cli@v1.0.0
+
+      - name: Get Service Info
+        id: service-info
+        env:
+          RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
+          RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
+          RYVN_API_URL: ${{ inputs.ryvn_api_url }}
+          RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
+        run: |
+          service_json=$(ryvn get service ${{ inputs.service_name }} -o json)
+          service_type=$(echo "$service_json" | jq -r '.definition.type')
+          echo "service_type=$service_type" >> $GITHUB_OUTPUT
+
+          # Derive tag prefix from service type
+          if [ "$service_type" = "terraform.v1" ]; then
+            tag_prefix=$(echo "$service_json" | jq -r '.definition.tfSourceTagPrefix // ""')
+          else
+            tag_prefix="${{ inputs.service_name }}@"
+          fi
+          echo "tag_prefix=$tag_prefix" >> $GITHUB_OUTPUT
+
+          # Determine if this service type requires a build step
+          if [ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]; then
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+          elif [ "$service_type" = "helm-chart.v1" ]; then
+            # Helm charts only need a build when the chart repository is configured
+            chart_repo=$(echo "$service_json" | jq -r '.definition.chartRepository // ""')
+            if [ -n "$chart_repo" ] && [ "$chart_repo" != "null" ]; then
+              echo "needs_build=true" >> $GITHUB_OUTPUT
+            else
+              echo "::warning::helm-chart.v1 service missing chartRepository configuration, skipping build step"
+              echo "needs_build=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "needs_build=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate Release Tag
+        id: generate-tag
+        env:
+          RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
+          RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
+          RYVN_API_URL: ${{ inputs.ryvn_api_url }}
+          RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
+        run: |
+          tag_info=$(ryvn generate-release-tag ${{ inputs.service_name }} --prefix=${{ steps.service-info.outputs.tag_prefix }} -o json --default-bump-minor)
+
+          version=$(echo "$tag_info" | jq -r '.version')
+          new_tag=$(echo "$tag_info" | jq -r '.tag')
+          channel=$(echo "$tag_info" | jq -r '.channel')
+          isPreview=$(echo "$tag_info" | jq -r '.isPreview')
+
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+          echo "channel=$channel" >> $GITHUB_OUTPUT
+          echo "isPreview=$isPreview" >> $GITHUB_OUTPUT
+
+      - name: Build and Push
+        if: steps.service-info.outputs.needs_build == 'true'
+        uses: ryvn-technologies/ryvn-build-action@v2
+        with:
+          service_name: ${{ inputs.service_name }}
+          version: ${{ steps.generate-tag.outputs.version }}
+          build_only: ${{ !(github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || steps.generate-tag.outputs.isPreview == 'true') }}
+          ryvn_client_id: ${{ secrets.RYVN_CLIENT_ID }}
+          ryvn_client_secret: ${{ secrets.RYVN_CLIENT_SECRET }}
+          build_args: ${{ inputs.build_args }}
+          platforms: ${{ inputs.platforms }}
+          use_nixpacks: ${{ inputs.use_nixpacks }}
+          nixpacks_pkgs: ${{ inputs.nixpacks_pkgs }}
+          nixpacks_apt: ${{ inputs.nixpacks_apt }}
+          disable_cache: ${{ inputs.disable_cache }}
+          ryvn_api_url: ${{ inputs.ryvn_api_url }}
+          ryvn_auth_url: ${{ inputs.ryvn_auth_url }}
+
+      - name: Create Ryvn Release
+        if: |
+          !contains(github.event.head_commit.message, '[skip-release]') &&
+          !contains(github.event.pull_request.title, '[skip-release]') &&
+          (steps.generate-tag.outputs.isPreview == 'true' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        env:
+          RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
+          RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
+          RYVN_API_URL: ${{ inputs.ryvn_api_url }}
+          RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
+        run: |
+          version="${{ steps.generate-tag.outputs.new_tag }}"
+          version=${version#${{ steps.service-info.outputs.tag_prefix }}}
+          version=${version#@}
+          channel="${{ steps.generate-tag.outputs.channel }}"
+          is_preview="${{ steps.generate-tag.outputs.isPreview }}"
+
+          # Validate that preview releases have a channel
+          if [ "$is_preview" = "true" ] && [ -z "$channel" ]; then
+            echo "Error: Preview releases must specify a channel"
+            exit 1
+          fi
+
+          if [ -n "$channel" ]; then
+            ryvn create release ${{ inputs.service_name }} $version --channel "$channel"
+          else
+            ryvn create release ${{ inputs.service_name }} $version
+          fi
+
+      - name: Create GitHub Tag
+        if: |
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          !contains(github.event.head_commit.message, '[skip-release]') &&
+          !contains(github.event.pull_request.title, '[skip-release]')
+        run: |
+          new_tag="${{ steps.generate-tag.outputs.new_tag }}"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git tag $new_tag
+          git push origin $new_tag
+
+      - name: Create GitHub Release
+        if: |
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          !contains(github.event.head_commit.message, '[skip-release]') &&
+          !contains(github.event.pull_request.title, '[skip-release]')
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.generate-tag.outputs.new_tag }}
+          name: ${{ steps.generate-tag.outputs.new_tag }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
