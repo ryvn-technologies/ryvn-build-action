@@ -1,4 +1,5 @@
 name: Ryvn Build & Release
+# Synced from ryvn monorepo via sync-ryvn-build-action workflow
 
 on:
   workflow_call:
@@ -12,36 +13,11 @@ on:
         required: false
         type: string
         default: '["ubuntu-latest"]'
-      build_args:
-        description: "Build arguments to pass to the Docker build"
+      env:
+        description: "Environment variables for the build step (KEY=VALUE per line)"
         required: false
         type: string
         default: ""
-      platforms:
-        description: "Target platforms for Docker build"
-        required: false
-        type: string
-        default: "linux/amd64"
-      use_nixpacks:
-        description: "Use Nixpacks instead of Dockerfile"
-        required: false
-        type: boolean
-        default: false
-      nixpacks_pkgs:
-        description: "Additional Nix packages to install"
-        required: false
-        type: string
-        default: ""
-      nixpacks_apt:
-        description: "Additional Apt packages to install"
-        required: false
-        type: string
-        default: ""
-      disable_cache:
-        description: "Disable all build caching"
-        required: false
-        type: boolean
-        default: false
       ryvn_api_url:
         description: "Ryvn API URL (for self-hosted or dev instances)"
         required: false
@@ -131,6 +107,10 @@ jobs:
           echo "channel=$channel" >> $GITHUB_OUTPUT
           echo "isPreview=$isPreview" >> $GITHUB_OUTPUT
 
+      - name: Set build environment
+        if: inputs.env != '' && steps.service-info.outputs.needs_build == 'true'
+        run: echo "${{ inputs.env }}" >> $GITHUB_ENV
+
       - name: Build and Push
         if: steps.service-info.outputs.needs_build == 'true'
         uses: ryvn-technologies/ryvn-build-action@v2
@@ -140,12 +120,6 @@ jobs:
           build_only: ${{ !(github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || steps.generate-tag.outputs.isPreview == 'true') }}
           ryvn_client_id: ${{ secrets.RYVN_CLIENT_ID }}
           ryvn_client_secret: ${{ secrets.RYVN_CLIENT_SECRET }}
-          build_args: ${{ inputs.build_args }}
-          platforms: ${{ inputs.platforms }}
-          use_nixpacks: ${{ inputs.use_nixpacks }}
-          nixpacks_pkgs: ${{ inputs.nixpacks_pkgs }}
-          nixpacks_apt: ${{ inputs.nixpacks_apt }}
-          disable_cache: ${{ inputs.disable_cache }}
           ryvn_api_url: ${{ inputs.ryvn_api_url }}
           ryvn_auth_url: ${{ inputs.ryvn_auth_url }}
 
