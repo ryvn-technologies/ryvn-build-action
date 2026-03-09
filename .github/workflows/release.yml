@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: ""
+      ryvn_project_id:
+        description: "Ryvn Project ID (for local dev setups)"
+        required: false
+        type: string
+        default: ""
     secrets:
       RYVN_CLIENT_ID:
         required: true
@@ -58,6 +63,7 @@ jobs:
           RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
           RYVN_API_URL: ${{ inputs.ryvn_api_url }}
           RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
+          RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
         run: |
           service_json=$(ryvn get service ${{ inputs.service_name }} -o json)
           service_type=$(echo "$service_json" | jq -r '.definition.type')
@@ -94,18 +100,19 @@ jobs:
           RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
           RYVN_API_URL: ${{ inputs.ryvn_api_url }}
           RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
+          RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
         run: |
           tag_info=$(ryvn generate-release-tag ${{ inputs.service_name }} --prefix=${{ steps.service-info.outputs.tag_prefix }} -o json --default-bump-minor)
 
           version=$(echo "$tag_info" | jq -r '.version')
           new_tag=$(echo "$tag_info" | jq -r '.tag')
           channel=$(echo "$tag_info" | jq -r '.channel')
-          isPreview=$(echo "$tag_info" | jq -r '.isPreview')
+          should_release=$(echo "$tag_info" | jq -r '.shouldRelease')
 
           echo "version=$version" >> $GITHUB_OUTPUT
           echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
           echo "channel=$channel" >> $GITHUB_OUTPUT
-          echo "isPreview=$isPreview" >> $GITHUB_OUTPUT
+          echo "should_release=$should_release" >> $GITHUB_OUTPUT
 
       - name: Set build environment
         if: inputs.env != '' && steps.service-info.outputs.needs_build == 'true'
@@ -117,44 +124,35 @@ jobs:
         with:
           service_name: ${{ inputs.service_name }}
           version: ${{ steps.generate-tag.outputs.version }}
-          build_only: ${{ !(github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || steps.generate-tag.outputs.isPreview == 'true') }}
+          build_only: ${{ steps.generate-tag.outputs.channel == '' }}
           ryvn_client_id: ${{ secrets.RYVN_CLIENT_ID }}
           ryvn_client_secret: ${{ secrets.RYVN_CLIENT_SECRET }}
           ryvn_api_url: ${{ inputs.ryvn_api_url }}
           ryvn_auth_url: ${{ inputs.ryvn_auth_url }}
+          ryvn_project_id: ${{ inputs.ryvn_project_id }}
 
       - name: Create Ryvn Release
         if: |
+          steps.generate-tag.outputs.channel != '' &&
           !contains(github.event.head_commit.message, '[skip-release]') &&
-          !contains(github.event.pull_request.title, '[skip-release]') &&
-          (steps.generate-tag.outputs.isPreview == 'true' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+          !contains(github.event.pull_request.title, '[skip-release]')
         env:
           RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
           RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
           RYVN_API_URL: ${{ inputs.ryvn_api_url }}
           RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
+          RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
         run: |
           version="${{ steps.generate-tag.outputs.new_tag }}"
           version=${version#${{ steps.service-info.outputs.tag_prefix }}}
           version=${version#@}
           channel="${{ steps.generate-tag.outputs.channel }}"
-          is_preview="${{ steps.generate-tag.outputs.isPreview }}"
 
-          # Validate that preview releases have a channel
-          if [ "$is_preview" = "true" ] && [ -z "$channel" ]; then
-            echo "Error: Preview releases must specify a channel"
-            exit 1
-          fi
-
-          if [ -n "$channel" ]; then
-            ryvn create release ${{ inputs.service_name }} $version --channel "$channel"
-          else
-            ryvn create release ${{ inputs.service_name }} $version
-          fi
+          ryvn create release ${{ inputs.service_name }} $version --channel "$channel"
 
       - name: Create GitHub Tag
         if: |
-          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          steps.generate-tag.outputs.should_release == 'true' &&
           !contains(github.event.head_commit.message, '[skip-release]') &&
           !contains(github.event.pull_request.title, '[skip-release]')
         run: |
@@ -166,13 +164,13 @@ jobs:
 
       - name: Create GitHub Release
         if: |
-          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          steps.generate-tag.outputs.should_release == 'true' &&
           !contains(github.event.head_commit.message, '[skip-release]') &&
           !contains(github.event.pull_request.title, '[skip-release]')
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.generate-tag.outputs.new_tag }}
           name: ${{ steps.generate-tag.outputs.new_tag }}
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           prerelease: false
