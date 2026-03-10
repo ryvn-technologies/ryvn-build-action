@@ -13,11 +13,6 @@ on:
         required: false
         type: string
         default: '["ubuntu-latest"]'
-      env:
-        description: "Environment variables for the build step (KEY=VALUE per line)"
-        required: false
-        type: string
-        default: ""
       ryvn_api_url:
         description: "Ryvn API URL (for self-hosted or dev instances)"
         required: false
@@ -38,6 +33,9 @@ on:
         required: true
       RYVN_CLIENT_SECRET:
         required: true
+      BUILD_SECRETS:
+        description: "Additional secrets for the build step (KEY=VALUE per line)"
+        required: false
 
 jobs:
   build-and-release:
@@ -46,6 +44,9 @@ jobs:
     permissions:
       contents: write
       id-token: write
+
+    env:
+      HAS_BUILD_SECRETS: ${{ secrets.BUILD_SECRETS != '' }}
 
     steps:
       - name: Checkout code
@@ -115,8 +116,10 @@ jobs:
           echo "should_release=$should_release" >> $GITHUB_OUTPUT
 
       - name: Set build environment
-        if: inputs.env != '' && steps.service-info.outputs.needs_build == 'true'
-        run: echo "${{ inputs.env }}" >> $GITHUB_ENV
+        if: env.HAS_BUILD_SECRETS == 'true' && steps.service-info.outputs.needs_build == 'true'
+        run: echo "$BUILD_SECRETS" >> $GITHUB_ENV
+        env:
+          BUILD_SECRETS: ${{ secrets.BUILD_SECRETS }}
 
       - name: Build and Push
         if: steps.service-info.outputs.needs_build == 'true'
