@@ -72,7 +72,7 @@ jobs:
 
           # Derive tag prefix from service type
           if [ "$service_type" = "terraform.v1" ]; then
-            tag_prefix=$(echo "$service_json" | jq -r '.definition.tfSourceTagPrefix // ""')
+            tag_prefix=$(echo "$service_json" | jq -r '.definition.source.tagPrefix // ""')
           else
             tag_prefix="${{ inputs.service_name }}@"
           fi
