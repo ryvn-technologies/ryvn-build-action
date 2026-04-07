@@ -82,13 +82,13 @@ jobs:
           if [ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]; then
             echo "needs_build=true" >> $GITHUB_OUTPUT
           elif [ "$service_type" = "helm-chart.v1" ]; then
-            # Helm charts only need a build when the chart repository is configured
+            # Helm charts require chartRepository to build and release
             chart_repo=$(echo "$service_json" | jq -r '.definition.chartRepository // ""')
             if [ -n "$chart_repo" ] && [ "$chart_repo" != "null" ]; then
               echo "needs_build=true" >> $GITHUB_OUTPUT
             else
-              echo "::warning::helm-chart.v1 service missing chartRepository configuration, skipping build step"
-              echo "needs_build=false" >> $GITHUB_OUTPUT
+              echo "::error::helm-chart.v1 service is missing required chartRepository configuration"
+              exit 1
             fi
           else
             echo "needs_build=false" >> $GITHUB_OUTPUT
