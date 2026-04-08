@@ -59,6 +59,10 @@ inputs:
     description: "Disable all caching (GitHub Actions cache and build cache)"
     required: false
     default: "false"
+  build_secrets:
+    description: "Docker BuildKit secrets (KEY=VALUE per line). Mounted via --secret so they don't leak into image layers. Users access them with RUN --mount=type=secret,id=KEY in their Dockerfile."
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -257,33 +261,6 @@ runs:
         cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
         env: ${{ steps.service.outputs.build_args }}
 
-    # Prepare BuildKit secret mounts from DOCKER_BUILD_SECRET_IDS env var.
-    # Set by the reusable workflow when BUILD_SECRETS is provided.
-    # Secrets are passed as both --build-arg (backward compat) and --secret
-    # so users can migrate Dockerfiles from ARG to RUN --mount=type=secret.
-    - name: Prepare Docker secret mounts
-      id: docker-secrets
-      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
-      shell: bash
-      run: |
-        if [ -z "$DOCKER_BUILD_SECRET_IDS" ]; then
-          echo "secrets=" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-
-        # docker/build-push-action expects secrets as KEY=VALUE per line.
-        # Resolve each key from the environment (set via $GITHUB_ENV by the
-        # reusable workflow). The action converts these to --secret flags.
-        echo "secrets<<EOF" >> $GITHUB_OUTPUT
-        IFS=',' read -ra ids <<< "$DOCKER_BUILD_SECRET_IDS"
-        for id in "${ids[@]}"; do
-          value="${!id}"
-          if [ -n "$value" ]; then
-            echo "$id=$value" >> $GITHUB_OUTPUT
-          fi
-        done
-        echo "EOF" >> $GITHUB_OUTPUT
-
     # Standard Docker Build Steps - only run if not using Nixpacks
     - name: Set up Docker Buildx (Blacksmith)
       if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
@@ -307,7 +284,7 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ steps.service.outputs.build_args }}
-        secrets: ${{ steps.docker-secrets.outputs.secrets }}
+        secrets: ${{ inputs.build_secrets }}
         platforms: ${{ inputs.platforms }}
 
     - name: Build and push Docker image (Docker)
@@ -320,7 +297,7 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ steps.service.outputs.build_args }}
-        secrets: ${{ steps.docker-secrets.outputs.secrets }}
+        secrets: ${{ inputs.build_secrets }}
         cache-from: ${{ inputs.disable_cache != 'true' && format('type=gha,scope={0}', inputs.service_name) || '' }}
         cache-to: ${{ inputs.disable_cache != 'true' && format('type=gha,mode=max,scope={0}', inputs.service_name) || '' }}
         platforms: ${{ inputs.platforms }}
