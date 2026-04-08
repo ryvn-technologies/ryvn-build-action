@@ -133,6 +133,7 @@ jobs:
           ryvn_api_url: ${{ inputs.ryvn_api_url }}
           ryvn_auth_url: ${{ inputs.ryvn_auth_url }}
           ryvn_project_id: ${{ inputs.ryvn_project_id }}
+          build_secrets: ${{ secrets.BUILD_SECRETS }}
 
       - name: Create Ryvn Release
         if: |
