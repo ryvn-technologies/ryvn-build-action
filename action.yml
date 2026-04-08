@@ -271,17 +271,17 @@ runs:
           exit 0
         fi
 
-        secrets=""
+        # docker/build-push-action expects secrets as KEY=VALUE per line.
+        # Resolve each key from the environment (set via $GITHUB_ENV by the
+        # reusable workflow). The action converts these to --secret flags.
+        echo "secrets<<EOF" >> $GITHUB_OUTPUT
         IFS=',' read -ra ids <<< "$DOCKER_BUILD_SECRET_IDS"
         for id in "${ids[@]}"; do
-          if [ -n "$secrets" ]; then
-            secrets="$secrets"$'\n'
+          value="${!id}"
+          if [ -n "$value" ]; then
+            echo "$id=$value" >> $GITHUB_OUTPUT
           fi
-          secrets="${secrets}id=${id},env=${id}"
         done
-
-        echo "secrets<<EOF" >> $GITHUB_OUTPUT
-        echo "$secrets" >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
 
     # Standard Docker Build Steps - only run if not using Nixpacks
