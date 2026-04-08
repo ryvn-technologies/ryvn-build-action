@@ -59,6 +59,10 @@ inputs:
     description: "Disable all caching (GitHub Actions cache and build cache)"
     required: false
     default: "false"
+  build_secrets:
+    description: "Docker BuildKit secrets (KEY=VALUE per line). Mounted via --secret so they don't leak into image layers. Users access them with RUN --mount=type=secret,id=KEY in their Dockerfile."
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -280,6 +284,7 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ steps.service.outputs.build_args }}
+        secrets: ${{ inputs.build_secrets }}
         platforms: ${{ inputs.platforms }}
 
     - name: Build and push Docker image (Docker)
@@ -292,6 +297,7 @@ runs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         build-args: ${{ steps.service.outputs.build_args }}
+        secrets: ${{ inputs.build_secrets }}
         cache-from: ${{ inputs.disable_cache != 'true' && format('type=gha,scope={0}', inputs.service_name) || '' }}
         cache-to: ${{ inputs.disable_cache != 'true' && format('type=gha,mode=max,scope={0}', inputs.service_name) || '' }}
         platforms: ${{ inputs.platforms }}
