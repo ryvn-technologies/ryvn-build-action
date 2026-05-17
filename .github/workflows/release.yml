@@ -81,6 +81,31 @@ jobs:
           # Determine if this service type requires a build step
           if [ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]; then
             echo "needs_build=true" >> $GITHUB_OUTPUT
+            registry_name=$(echo "$service_json" | jq -r '.definition.registry // ""')
+            image_name=$(echo "$service_json" | jq -r '.definition.imageName // ""')
+
+            if [ -z "$registry_name" ] || [ "$registry_name" = "null" ]; then
+              echo "::error::${service_type} service is missing required registry configuration"
+              exit 1
+            fi
+            if [ -z "$image_name" ] || [ "$image_name" = "null" ]; then
+              echo "::error::${service_type} service is missing required imageName configuration"
+              exit 1
+            fi
+
+            registry_json=$(ryvn get registry "$registry_name" -o json)
+            registry_url=$(echo "$registry_json" | jq -r '.definition.url // ""')
+            registry_url=${registry_url#http://}
+            registry_url=${registry_url#https://}
+            registry_url=${registry_url#oci://}
+            registry_url=${registry_url%/}
+
+            if [ -z "$registry_url" ] || [ "$registry_url" = "null" ]; then
+              echo "::error::registry '$registry_name' is missing required url configuration"
+              exit 1
+            fi
+
+            echo "image_repository=${registry_url}/${image_name}" >> $GITHUB_OUTPUT
           elif [ "$service_type" = "helm-chart.v1" ]; then
             # Helm charts require chartRepository to build and release
             chart_repo=$(echo "$service_json" | jq -r '.definition.chartRepository // ""')
@@ -135,6 +160,37 @@ jobs:
           ryvn_project_id: ${{ inputs.ryvn_project_id }}
           build_secrets: ${{ secrets.BUILD_SECRETS }}
 
+      - name: Prepare Release Metadata
+        id: release-metadata
+        if: |
+          steps.generate-tag.outputs.channel != '' &&
+          (steps.service-info.outputs.service_type == 'web-server.v1' || steps.service-info.outputs.service_type == 'job.v1')
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          SERVICE_TYPE: ${{ steps.service-info.outputs.service_type }}
+          IMAGE_REPOSITORY: ${{ steps.service-info.outputs.image_repository }}
+          IMAGE_TAG: ${{ steps.generate-tag.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if ! ryvn generate-release-metadata --help >/dev/null 2>&1; then
+            echo "file=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          release_metadata_file="${RUNNER_TEMP}/ryvn-release-metadata.json"
+          metadata_args=()
+          if [ "$SERVICE_TYPE" = "web-server.v1" ]; then
+            metadata_args+=(--detect-ports)
+          fi
+
+          ryvn generate-release-metadata "$SERVICE_NAME" "$IMAGE_TAG" \
+            --image-repository "$IMAGE_REPOSITORY" \
+            --output-file "$release_metadata_file" \
+            "${metadata_args[@]}"
+
+          echo "file=$release_metadata_file" >> "$GITHUB_OUTPUT"
+
       - name: Create Ryvn Release
         if: |
           steps.generate-tag.outputs.channel != '' &&
@@ -151,8 +207,12 @@ jobs:
           version=${version#${{ steps.service-info.outputs.tag_prefix }}}
           version=${version#@}
           channel="${{ steps.generate-tag.outputs.channel }}"
+          metadata_args=()
+          if [ -n "${{ steps.release-metadata.outputs.file }}" ]; then
+            metadata_args+=(--metadata-file "${{ steps.release-metadata.outputs.file }}")
+          fi
 
-          ryvn create release ${{ inputs.service_name }} $version --channel "$channel"
+          ryvn create release ${{ inputs.service_name }} $version --channel "$channel" "${metadata_args[@]}"
 
       - name: Create GitHub Tag
         if: |
