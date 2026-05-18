@@ -24,6 +24,9 @@ inputs:
   ryvn_auth_url:
     description: "Ryvn Auth URL for self-hosted or dev instances (optional)"
     required: false
+  ryvn_project_id:
+    description: "Ryvn Project ID for local dev setups (optional)"
+    required: false
   build_args:
     description: "Build arguments to pass to the Docker build"
     required: false
@@ -64,6 +67,11 @@ inputs:
     required: false
     default: ""
 
+outputs:
+  build_artifacts:
+    description: "JSON array of artifacts built by this action"
+    value: ${{ steps.artifacts.outputs.build_artifacts }}
+
 runs:
   using: "composite"
   steps:
@@ -84,6 +92,7 @@ runs:
       env:
         RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
         RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
+        RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
       run: |
         # Set RYVN_API_URL only if provided
         if [ -n "${{ inputs.ryvn_api_url }}" ]; then
@@ -275,6 +284,7 @@ runs:
         driver: ${{ inputs.buildx_driver }}
 
     - name: Build and push Docker image (Blacksmith)
+      id: build_blacksmith
       if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
       uses: useblacksmith/build-push-action@v2
       with:
@@ -286,8 +296,10 @@ runs:
         build-args: ${{ steps.service.outputs.build_args }}
         secrets: ${{ inputs.build_secrets }}
         platforms: ${{ inputs.platforms }}
+        load: ${{ inputs.build_only == 'true' && !contains(inputs.platforms, ',') }}
 
     - name: Build and push Docker image (Docker)
+      id: build_docker
       if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
       uses: docker/build-push-action@v5
       with:
@@ -301,6 +313,7 @@ runs:
         cache-from: ${{ inputs.disable_cache != 'true' && format('type=gha,scope={0}', inputs.service_name) || '' }}
         cache-to: ${{ inputs.disable_cache != 'true' && format('type=gha,mode=max,scope={0}', inputs.service_name) || '' }}
         platforms: ${{ inputs.platforms }}
+        load: ${{ inputs.build_only == 'true' && !contains(inputs.platforms, ',') }}
 
     # Helm Chart Steps
     - name: Install Helm
@@ -326,6 +339,103 @@ runs:
       shell: bash
       run: |
         helm push ${{ steps.service.outputs.chart_name }}-${{ inputs.version }}.tgz oci://${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.chart_repo }}
+
+    - name: Emit build artifacts
+      id: artifacts
+      shell: bash
+      env:
+        SERVICE_TYPE: ${{ steps.service.outputs.service_type }}
+        SERVICE_NAME: ${{ inputs.service_name }}
+        VERSION: ${{ inputs.version }}
+        IMAGE_REPOSITORY: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}
+        IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        BUILD_ONLY: ${{ inputs.build_only }}
+        DOCKER_DIGEST: ${{ steps.build_docker.outputs.digest }}
+        BLACKSMITH_DIGEST: ${{ steps.build_blacksmith.outputs.digest }}
+      run: |
+        set -euo pipefail
+
+        if [[ "$SERVICE_TYPE" != "web-server.v1" && "$SERVICE_TYPE" != "job.v1" ]]; then
+          echo 'build_artifacts=[]' >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Prefer the expected semver tag, but fall back to the first metadata-action tag.
+        image_ref="${IMAGE_REPOSITORY}:${VERSION}"
+        if ! printf '%s\n' "$IMAGE_TAGS" | grep -qxF "$image_ref"; then
+          first_tag="$(printf '%s\n' "$IMAGE_TAGS" | sed '/^[[:space:]]*$/d' | head -n1 || true)"
+          if [[ -n "$first_tag" ]]; then
+            image_ref="$first_tag"
+          fi
+        fi
+
+        image_repository="${image_ref%:*}"
+        image_tag="${image_ref##*:}"
+
+        # Prefer an immutable digest when build-push-action provided one.
+        digest="${DOCKER_DIGEST:-${BLACKSMITH_DIGEST:-}}"
+        if [[ -n "$digest" && "$digest" != "null" ]]; then
+          inspect_ref="${image_repository}@${digest}"
+        else
+          inspect_ref="$image_ref"
+        fi
+
+        exposed_ports='null'
+        exposed_ports_source=''
+
+        if [[ "$BUILD_ONLY" != "true" ]]; then
+          # This reads the registry manifest/config; it does not pull image layers.
+          if image_json="$(docker buildx imagetools inspect "$inspect_ref" --format '{{json .Image}}')"; then
+            # Single-platform image: .Image is the image config.
+            # Multi-platform image: .Image is a map of platform -> image config.
+            if jq -e 'type == "object" and has("config")' >/dev/null <<<"$image_json"; then
+              exposed_ports="$(jq -c '(.config.ExposedPorts // {}) | keys | sort' <<<"$image_json")"
+            else
+              exposed_ports="$(jq -c '
+                [
+                  to_entries[]
+                  | ((.value.config.ExposedPorts? // {}) | keys[])
+                ]
+                | unique
+                | sort
+              ' <<<"$image_json")"
+            fi
+
+            exposed_ports_source='image'
+          else
+            echo "::warning::could not inspect image config for exposed ports: $inspect_ref"
+          fi
+        elif docker image inspect "$image_ref" >/tmp/ryvn-image-inspect.json 2>/dev/null; then
+          # Local fallback for build_only=true when the image was loaded into Docker.
+          exposed_ports="$(jq -c '.[0].Config.ExposedPorts // {} | keys | sort' /tmp/ryvn-image-inspect.json)"
+          exposed_ports_source='image'
+        else
+          echo "::warning::build_only=true and image was not pushed or loaded locally; cannot read exposedPorts without pulling/exporting the image."
+        fi
+
+        build_artifacts="$(jq -cn \
+          --arg name "$SERVICE_NAME" \
+          --arg repository "$image_repository" \
+          --arg tag "$image_tag" \
+          --argjson exposedPorts "$exposed_ports" \
+          --arg exposedPortsSource "$exposed_ports_source" \
+          '[{
+            name: $name,
+            image: ({
+              repository: $repository,
+              tag: $tag
+            } + if $exposedPortsSource == "" then {} else {
+              exposedPorts: $exposedPorts,
+              exposedPortsSource: $exposedPortsSource
+            } end)
+          }]'
+        )"
+
+        {
+          echo "build_artifacts<<EOF"
+          echo "$build_artifacts"
+          echo "EOF"
+        } >> "$GITHUB_OUTPUT"
 
 branding:
   icon: "package"
