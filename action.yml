@@ -92,7 +92,6 @@ runs:
       env:
         RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
         RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
-        RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
       run: |
         # Set RYVN_API_URL only if provided
         if [ -n "${{ inputs.ryvn_api_url }}" ]; then
@@ -102,6 +101,11 @@ runs:
         # Set RYVN_AUTH_URL only if provided
         if [ -n "${{ inputs.ryvn_auth_url }}" ]; then
           export RYVN_AUTH_URL="${{ inputs.ryvn_auth_url }}"
+        fi
+
+        # Set RYVN_PROJECT_ID only if provided
+        if [ -n "${{ inputs.ryvn_project_id }}" ]; then
+          export RYVN_PROJECT_ID="${{ inputs.ryvn_project_id }}"
         fi
 
         # Get service details
@@ -283,6 +287,31 @@ runs:
         endpoint: ${{ inputs.buildx_endpoint }}
         driver: ${{ inputs.buildx_driver }}
 
+    - name: Determine Docker output mode
+      id: docker_output
+      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
+      shell: bash
+      env:
+        BUILD_ONLY: ${{ inputs.build_only }}
+        PLATFORMS: ${{ inputs.platforms }}
+      run: |
+        set -euo pipefail
+
+        platform_count="$(
+          printf '%s\n' "$PLATFORMS" |
+            tr ',' '\n' |
+            sed '/^[[:space:]]*$/d' |
+            wc -l |
+            tr -d '[:space:]'
+        )"
+
+        load_image=false
+        if [[ "$BUILD_ONLY" == "true" && "$platform_count" == "1" ]]; then
+          load_image=true
+        fi
+
+        echo "load_image=$load_image" >> "$GITHUB_OUTPUT"
+
     - name: Build and push Docker image (Blacksmith)
       id: build_blacksmith
       if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
@@ -296,7 +325,7 @@ runs:
         build-args: ${{ steps.service.outputs.build_args }}
         secrets: ${{ inputs.build_secrets }}
         platforms: ${{ inputs.platforms }}
-        load: ${{ inputs.build_only == 'true' && !contains(inputs.platforms, ',') }}
+        load: ${{ steps.docker_output.outputs.load_image }}
 
     - name: Build and push Docker image (Docker)
       id: build_docker
@@ -313,7 +342,7 @@ runs:
         cache-from: ${{ inputs.disable_cache != 'true' && format('type=gha,scope={0}', inputs.service_name) || '' }}
         cache-to: ${{ inputs.disable_cache != 'true' && format('type=gha,mode=max,scope={0}', inputs.service_name) || '' }}
         platforms: ${{ inputs.platforms }}
-        load: ${{ inputs.build_only == 'true' && !contains(inputs.platforms, ',') }}
+        load: ${{ steps.docker_output.outputs.load_image }}
 
     # Helm Chart Steps
     - name: Install Helm
