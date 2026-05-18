@@ -124,7 +124,7 @@ jobs:
       - name: Build and Push
         id: build
         if: steps.service-info.outputs.needs_build == 'true'
-        uses: ryvn-technologies/ryvn-build-action@v2
+        uses: ryvn-technologies/ryvn-build-action@is/emit-build-artifacts # TODO: remove after testing
         with:
           service_name: ${{ inputs.service_name }}
           version: ${{ steps.generate-tag.outputs.version }}
