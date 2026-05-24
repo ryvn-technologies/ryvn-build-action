@@ -166,10 +166,16 @@ runs:
           echo "build_args=${{ inputs.build_args }}" >> $GITHUB_OUTPUT
         fi
 
-        # Extract and validate image name
-        image_name=$(jq -r '.definition.imageName' service.json)
-        if ([ "$image_name" = "null" ] || [ -z "$image_name" ]) && ([ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]); then
-          echo "Error: imageName not found in service definition"
+        # Extract and validate canonical image reference. For ryvn-built
+        # services the backend writes the full host+path ref into
+        # `definition.image` (e.g.
+        # `703671917981.dkr.ecr.us-east-1.amazonaws.com/<org>/<svc>`),
+        # so we no longer need to concatenate registry_url + imageName
+        # ourselves. The legacy `imageName` field was removed from the
+        # API response in the spec_revision cleanup.
+        image_ref=$(jq -r '.definition.image' service.json)
+        if ([ "$image_ref" = "null" ] || [ -z "$image_ref" ]) && ([ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]); then
+          echo "Error: definition.image not found in service definition"
           exit 1
         fi
 
@@ -215,7 +221,7 @@ runs:
         echo "registry_url=$registry_url" >> $GITHUB_OUTPUT
         echo "role_arn=$role_arn" >> $GITHUB_OUTPUT
         echo "region=$region" >> $GITHUB_OUTPUT
-        echo "image_name=$image_name" >> $GITHUB_OUTPUT
+        echo "image_ref=$image_ref" >> $GITHUB_OUTPUT
         echo "build_command=$build_command" >> $GITHUB_OUTPUT
         echo "use_nixpacks_from_service=$use_nixpacks_from_service" >> $GITHUB_OUTPUT
 
@@ -236,7 +242,7 @@ runs:
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}
+        images: ${{ steps.service.outputs.image_ref }}
         tags: |
           type=semver,pattern={{version}},value=${{ inputs.version }}
           type=sha
@@ -255,7 +261,7 @@ runs:
         pkgs: ${{ inputs.nixpacks_pkgs }}
         apt: ${{ inputs.nixpacks_apt }}
         cache: ${{ inputs.disable_cache == 'true' && 'false' || inputs.nixpacks_cache }}
-        cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
+        cache_tag: ${{ steps.service.outputs.image_ref }}:cache
         env: NIXPACKS_BUILD_CMD="${{ steps.service.outputs.build_command }}"
 
     # Nixpacks Build and Push (without build command)
@@ -271,7 +277,7 @@ runs:
         pkgs: ${{ inputs.nixpacks_pkgs }}
         apt: ${{ inputs.nixpacks_apt }}
         cache: ${{ inputs.disable_cache == 'true' && 'false' || inputs.nixpacks_cache }}
-        cache_tag: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}:cache
+        cache_tag: ${{ steps.service.outputs.image_ref }}:cache
         env: ${{ steps.service.outputs.build_args }}
 
     # Standard Docker Build Steps - only run if not using Nixpacks
@@ -376,7 +382,7 @@ runs:
         SERVICE_TYPE: ${{ steps.service.outputs.service_type }}
         SERVICE_NAME: ${{ inputs.service_name }}
         VERSION: ${{ inputs.version }}
-        IMAGE_REPOSITORY: ${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.image_name }}
+        IMAGE_REPOSITORY: ${{ steps.service.outputs.image_ref }}
         IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         BUILD_ONLY: ${{ inputs.build_only }}
         DOCKER_DIGEST: ${{ steps.build_docker.outputs.digest }}
