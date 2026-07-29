@@ -186,13 +186,6 @@ runs:
           exit 1
         fi
 
-        # Extract chart name
-        chart_name=$(jq -r '.definition.chartName' service.json)
-        if ([ "$chart_name" = "null" ] || [ -z "$chart_name" ]) && [ "$service_type" = "helm-chart.v1" ]; then
-          echo "Error: chartName not found in service definition"
-          exit 1
-        fi
-
         chart_repo=$(jq -r '.definition.chartRepository' service.json)
         if ([ "$chart_repo" = "null" ] || [ -z "$chart_repo" ]) && [ "$service_type" = "helm-chart.v1" ]; then
           echo "Error: chartRepository not found in service definition"
@@ -214,7 +207,6 @@ runs:
         # Set outputs
         echo "service_type=$service_type" >> $GITHUB_OUTPUT
         echo "helm_chart_path=$helm_chart_path" >> $GITHUB_OUTPUT
-        echo "chart_name=$chart_name" >> $GITHUB_OUTPUT
         echo "chart_repo=$chart_repo" >> $GITHUB_OUTPUT
         echo "working_dir=$working_dir" >> $GITHUB_OUTPUT
         echo "dockerfile_path=$dockerfile_path" >> $GITHUB_OUTPUT
@@ -358,10 +350,28 @@ runs:
         version: v3.12.1
 
     - name: Package Helm Chart
+      id: helm_package
       if: steps.service.outputs.service_type == 'helm-chart.v1'
       shell: bash
+      env:
+        CHART_PATH: ${{ steps.service.outputs.helm_chart_path }}
+        VERSION: ${{ inputs.version }}
       run: |
-        helm package ${{ steps.service.outputs.helm_chart_path }} --version ${{ inputs.version }}
+        set -euo pipefail
+
+        chart_name="$(yq -er 'select(has("name")) | .name | tostring' "$CHART_PATH/Chart.yaml")"
+        chart_package="${PWD}/${chart_name}-${VERSION}.tgz"
+
+        helm package "$CHART_PATH" --version "$VERSION"
+
+        if [[ ! -f "$chart_package" ]]; then
+          echo "::error::expected Helm package '$chart_package'"
+          exit 1
+        fi
+
+        echo "Packaged chart '$chart_name' version '$VERSION' -> $chart_package"
+        echo "chart_package=$chart_package" >> "$GITHUB_OUTPUT"
+        echo "chart_name=$chart_name" >> "$GITHUB_OUTPUT"
 
     - name: Login to Helm Registry
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
@@ -370,10 +380,27 @@ runs:
         aws ecr get-login-password --region ${{ steps.service.outputs.region }} | helm registry login --username AWS --password-stdin ${{ steps.service.outputs.registry_url }}
 
     - name: Push Helm Chart to Registry
+      id: helm_push
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
       shell: bash
+      env:
+        CHART_PACKAGE: ${{ steps.helm_package.outputs.chart_package }}
+        REGISTRY_URL: ${{ steps.service.outputs.registry_url }}
+        CHART_REPO: ${{ steps.service.outputs.chart_repo }}
       run: |
-        helm push ${{ steps.service.outputs.chart_name }}-${{ inputs.version }}.tgz oci://${{ steps.service.outputs.registry_url }}/${{ steps.service.outputs.chart_repo }}
+        set -euo pipefail
+
+        # helm appends the packaged chart's name to this prefix, so the push
+        # lands on <chartRepository>/<Chart.yaml name> under the org's ECR path.
+        repo_url="oci://${REGISTRY_URL}/${CHART_REPO}"
+
+        # helm reports "Pushed:"/"Digest:" on stderr; tee keeps them in the log
+        # so a failed push still shows why it failed.
+        push_log="$(mktemp)"
+        helm push "$CHART_PACKAGE" "$repo_url" 2>&1 | tee "$push_log"
+
+        echo "repo_url=$repo_url" >> "$GITHUB_OUTPUT"
+        echo "digest=$(awk '/^Digest:/ { print $2; exit }' "$push_log")" >> "$GITHUB_OUTPUT"
 
     - name: Emit build artifacts
       id: artifacts
@@ -387,8 +414,46 @@ runs:
         BUILD_ONLY: ${{ inputs.build_only }}
         DOCKER_DIGEST: ${{ steps.build_docker.outputs.digest }}
         BLACKSMITH_DIGEST: ${{ steps.build_blacksmith.outputs.digest }}
+        HELM_CHART_NAME: ${{ steps.helm_package.outputs.chart_name }}
+        HELM_REPO_URL: ${{ steps.helm_push.outputs.repo_url }}
+        HELM_DIGEST: ${{ steps.helm_push.outputs.digest }}
       run: |
         set -euo pipefail
+
+        if [[ "$SERVICE_TYPE" == "helm-chart.v1" ]]; then
+          if [[ "$BUILD_ONLY" == "true" ]]; then
+            # The chart was packaged locally but was not published.
+            build_artifacts='[]'
+          else
+            : "${HELM_REPO_URL:?Helm push did not emit repo_url}"
+            : "${HELM_CHART_NAME:?Helm package did not emit chart_name}"
+            : "${HELM_DIGEST:?Helm push did not emit digest}"
+
+            build_artifacts="$(jq -cn \
+              --arg name "$SERVICE_NAME" \
+              --arg repoUrl "$HELM_REPO_URL" \
+              --arg chartName "$HELM_CHART_NAME" \
+              --arg version "$VERSION" \
+              --arg digest "$HELM_DIGEST" \
+              '[{
+                name: $name,
+                type: "helm-chart",
+                helmChart: {
+                  repoUrl: $repoUrl,
+                  chartName: $chartName,
+                  version: $version,
+                  digest: $digest
+                }
+              }]')"
+          fi
+
+          {
+            echo "build_artifacts<<EOF"
+            echo "$build_artifacts"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
 
         if [[ "$SERVICE_TYPE" != "web-server.v1" && "$SERVICE_TYPE" != "job.v1" ]]; then
           echo 'build_artifacts=[]' >> "$GITHUB_OUTPUT"
