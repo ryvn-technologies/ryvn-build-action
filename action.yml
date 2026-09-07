@@ -13,11 +13,21 @@ inputs:
     required: false
     default: "false"
   ryvn_client_id:
-    description: "Ryvn Client ID for authentication"
-    required: true
+    description: "Ryvn Client ID for static-credential authentication. Not needed when the job has `id-token: write` and the Ryvn org has keyless CI auth enabled; the CLI then authenticates with the job's GitHub OIDC token."
+    required: false
+    default: ""
   ryvn_client_secret:
-    description: "Ryvn Client Secret for authentication"
-    required: true
+    description: "Ryvn Client Secret for static-credential authentication (see ryvn_client_id)"
+    required: false
+    default: ""
+  ryvn_org_id:
+    description: "Ryvn organization ID. Only needed when more than one Ryvn organization trusts this repository (optional)"
+    required: false
+    default: ""
+  ryvn_cli_version:
+    description: "Ryvn CLI release to install (e.g. v1.190.0). Defaults to the installer's pinned version; keyless auth needs a CLI with the OIDC credential source (optional)"
+    required: false
+    default: ""
   ryvn_api_url:
     description: "Ryvn API URL for self-hosted or dev instances (optional)"
     required: false
@@ -77,6 +87,8 @@ runs:
   steps:
     - name: Install Ryvn CLI
       uses: ryvn-technologies/install-ryvn-cli@v1.0.0
+      env:
+        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version }}
 
     - name: Print Runner Info
       shell: bash
@@ -90,12 +102,20 @@ runs:
       id: service
       shell: bash
       env:
+        # Empty when the caller relies on keyless CI auth: the CLI exchanges the
+        # job's GitHub OIDC token itself and uses these only as the documented
+        # fallback.
         RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
         RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
       run: |
         # Set RYVN_API_URL only if provided
         if [ -n "${{ inputs.ryvn_api_url }}" ]; then
           export RYVN_API_URL="${{ inputs.ryvn_api_url }}"
+        fi
+
+        # Set RYVN_ORG_ID only if provided
+        if [ -n "${{ inputs.ryvn_org_id }}" ]; then
+          export RYVN_ORG_ID="${{ inputs.ryvn_org_id }}"
         fi
 
         # Set RYVN_AUTH_URL only if provided

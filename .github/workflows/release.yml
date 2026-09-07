@@ -28,11 +28,24 @@ on:
         required: false
         type: string
         default: ""
+      ryvn_org_id:
+        description: "Ryvn organization ID. Only needed when more than one Ryvn organization trusts this repository"
+        required: false
+        type: string
+        default: ""
+      ryvn_cli_version:
+        description: "Ryvn CLI release to install (e.g. v1.190.0). Defaults to the installer's pinned version; keyless auth needs a CLI with the OIDC credential source"
+        required: false
+        type: string
+        default: ""
     secrets:
+      # Optional since keyless CI auth: with `id-token: write` the CLI
+      # authenticates using the job's GitHub OIDC token and only falls back to
+      # these when the Ryvn org has not enabled keyless auth.
       RYVN_CLIENT_ID:
-        required: true
+        required: false
       RYVN_CLIENT_SECRET:
-        required: true
+        required: false
       BUILD_SECRETS:
         description: "Additional secrets for the build step (KEY=VALUE per line)"
         required: false
@@ -47,6 +60,12 @@ jobs:
 
     env:
       HAS_BUILD_SECRETS: ${{ secrets.BUILD_SECRETS != '' }}
+      RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
+      RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
+      RYVN_API_URL: ${{ inputs.ryvn_api_url }}
+      RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
+      RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
+      RYVN_ORG_ID: ${{ inputs.ryvn_org_id }}
 
     steps:
       - name: Checkout code
@@ -56,15 +75,11 @@ jobs:
 
       - name: Install Ryvn CLI
         uses: ryvn-technologies/install-ryvn-cli@v1.0.0
+        env:
+          RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version }}
 
       - name: Get Service Info
         id: service-info
-        env:
-          RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
-          RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
-          RYVN_API_URL: ${{ inputs.ryvn_api_url }}
-          RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
-          RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
         run: |
           service_json=$(ryvn get service ${{ inputs.service_name }} -o json)
           service_type=$(echo "$service_json" | jq -r '.definition.type')
@@ -96,12 +111,6 @@ jobs:
 
       - name: Generate Release Tag
         id: generate-tag
-        env:
-          RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
-          RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
-          RYVN_API_URL: ${{ inputs.ryvn_api_url }}
-          RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
-          RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
         run: |
           tag_info=$(ryvn generate-release-tag ${{ inputs.service_name }} --prefix=${{ steps.service-info.outputs.tag_prefix }} -o json --default-bump-minor)
 
@@ -134,6 +143,7 @@ jobs:
           ryvn_api_url: ${{ inputs.ryvn_api_url }}
           ryvn_auth_url: ${{ inputs.ryvn_auth_url }}
           ryvn_project_id: ${{ inputs.ryvn_project_id }}
+          ryvn_org_id: ${{ inputs.ryvn_org_id }}
           build_secrets: ${{ secrets.BUILD_SECRETS }}
 
       - name: Create Ryvn Release
@@ -142,11 +152,6 @@ jobs:
           !contains(github.event.head_commit.message, '[skip-release]') &&
           !contains(github.event.pull_request.title, '[skip-release]')
         env:
-          RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
-          RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
-          RYVN_API_URL: ${{ inputs.ryvn_api_url }}
-          RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url }}
-          RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id }}
           BUILD_ARTIFACTS: ${{ steps.build.outputs.build_artifacts }}
         run: |
           version="${{ steps.generate-tag.outputs.new_tag }}"

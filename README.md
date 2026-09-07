@@ -23,6 +23,34 @@ This GitHub Action builds and pushes Docker images or Helm charts to the Ryvn Re
     ryvn_client_secret: ${{ secrets.RYVN_CLIENT_SECRET }}
 ```
 
+## Authentication
+
+The action talks to the Ryvn API through the Ryvn CLI, which picks a credential in this order:
+
+1. `RYVN_ACCESS_TOKEN` in the job environment (a pre-issued Ryvn token, used as-is).
+2. **Keyless CI auth**: when the job has `permissions: id-token: write`, the CLI exchanges the job's GitHub OIDC token for a short-lived Ryvn credential scoped to the services this repository owns. No secrets are needed.
+3. `ryvn_client_id` / `ryvn_client_secret` (static credentials). When the OIDC environment is present these are used **only** if the hub reports that keyless auth is not enabled for the organization (or that more than one organization trusts the repository and `ryvn_org_id` was not given); any other exchange failure is fatal and never falls back to the static secret.
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and Push to Ryvn (keyless)
+        uses: ryvn-technologies/ryvn-build-action@v2
+        with:
+          service_name: my-service
+          version: 1.0.0
+```
+
+Set `ryvn_org_id` when more than one Ryvn organization trusts the same GitHub repository. Static credentials keep working unchanged for CI systems without OIDC and during the rollout.
+
+Keyless auth needs a Ryvn CLI with the OIDC credential source; there is no separate login step — every `ryvn` invocation exchanges the job's OIDC token on its own (cached within the process). Both the action and the reusable workflow (`.github/workflows/release.yml`) install the CLI and accept a `ryvn_cli_version` input (e.g. `v1.190.0`) to pin a release when the installer's default is older. A CLI that predates keyless auth ignores `id-token: write` and uses the static credentials if set; otherwise its first `ryvn` call fails on missing credentials.
+
 ## Inputs
 
 | Name                 | Description                                               | Required | Default |
@@ -30,8 +58,10 @@ This GitHub Action builds and pushes Docker images or Helm charts to the Ryvn Re
 | `service_name`       | Name of the service                                       | Yes      |         |
 | `version`            | Semantic version to tag the image/chart with              | Yes      |         |
 | `build_only`         | Build only, don't push to registry                        | No       | `false` |
-| `ryvn_client_id`     | Ryvn Client ID for authentication                         | Yes      |         |
-| `ryvn_client_secret` | Ryvn Client Secret for authentication                     | Yes      |         |
+| `ryvn_client_id`     | Ryvn Client ID (static credentials; see Authentication)   | No       |         |
+| `ryvn_client_secret` | Ryvn Client Secret (static credentials; see Authentication)| No       |         |
+| `ryvn_org_id`        | Ryvn organization ID, for repositories trusted by more than one organization | No |   |
+| `ryvn_cli_version`   | Ryvn CLI release to install (e.g. `v1.190.0`); default is the installer's pin | No |   |
 | `build_args`         | Build arguments to pass to the Docker build               | No       |         |
 | `use_nixpacks`       | Use Nixpacks to build Docker images instead of Dockerfile | No       | `false` |
 | `nixpacks_pkgs`      | Additional Nix packages to install in the environment     | No       | `""`    |
