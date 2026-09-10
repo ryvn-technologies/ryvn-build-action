@@ -38,6 +38,11 @@ on:
         required: false
         type: string
         default: ""
+      tag_prefix:
+        description: "Git tag prefix override (e.g. gcp-gke@). When set, used as-is instead of deriving the prefix from the service definition; needed for terraform services that use a public module `source` in a multi-service repository"
+        required: false
+        type: string
+        default: ""
     secrets:
       # Optional since keyless CI auth: with `id-token: write` the CLI
       # authenticates using the job's GitHub OIDC token and only falls back to
@@ -80,13 +85,17 @@ jobs:
 
       - name: Get Service Info
         id: service-info
+        env:
+          TAG_PREFIX_INPUT: ${{ inputs.tag_prefix }}
         run: |
           service_json=$(ryvn get service ${{ inputs.service_name }} -o json)
           service_type=$(echo "$service_json" | jq -r '.definition.type')
           echo "service_type=$service_type" >> $GITHUB_OUTPUT
 
-          # Derive tag prefix from service type
-          if [ "$service_type" = "terraform.v1" ]; then
+          # Tag prefix: explicit input wins; otherwise derive from service type
+          if [ -n "$TAG_PREFIX_INPUT" ]; then
+            tag_prefix="$TAG_PREFIX_INPUT"
+          elif [ "$service_type" = "terraform.v1" ]; then
             tag_prefix=$(echo "$service_json" | jq -r '.definition.source.tagPrefix // ""')
           else
             tag_prefix="${{ inputs.service_name }}@"
