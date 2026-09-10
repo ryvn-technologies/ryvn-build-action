@@ -51,6 +51,8 @@ Set `ryvn_org_id` when more than one Ryvn organization trusts the same GitHub re
 
 Keyless auth needs a Ryvn CLI with the OIDC credential source; there is no separate login step — every `ryvn` invocation exchanges the job's OIDC token on its own (cached within the process). Both the action and the reusable workflow (`.github/workflows/release.yml`) install the CLI and accept a `ryvn_cli_version` input (e.g. `v1.190.0`) to pin a release when the installer's default is older. A CLI that predates keyless auth ignores `id-token: write` and uses the static credentials if set; otherwise its first `ryvn` call fails on missing credentials.
 
+The reusable workflow inherits the `GITHUB_TOKEN` permissions granted by the calling job, so the caller decides the auth mode: `contents: write` plus `id-token: write` for keyless auth, or `contents: write` alone to force the static `RYVN_CLIENT_ID`/`RYVN_CLIENT_SECRET` credentials (e.g. for services whose spec has no GitHub `repo` locator, such as public terraform module `source`s).
+
 The reusable workflow also accepts an optional `tag_prefix` input (e.g. `gcp-gke@`) that overrides the tag prefix derived from the service definition — needed for terraform services using a public module `source` in a repository that releases several services.
 
 ## Inputs
