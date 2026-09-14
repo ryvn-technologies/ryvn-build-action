@@ -141,7 +141,7 @@ jobs:
       - name: Build and Push
         id: build
         if: steps.service-info.outputs.needs_build == 'true'
-        uses: ryvn-technologies/ryvn-build-action@v2
+        uses: ryvn-technologies/ryvn-build-action@3f980ebe854769b11211b3457dc14d2a8ada2bf7
         with:
           service_name: ${{ inputs.service_name }}
           version: ${{ steps.generate-tag.outputs.version }}
