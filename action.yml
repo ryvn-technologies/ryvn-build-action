@@ -25,7 +25,7 @@ inputs:
     required: false
     default: ""
   ryvn_cli_version:
-    description: "Ryvn CLI release to install (e.g. v1.190.0). Defaults to the installer's pinned version; keyless auth needs a CLI with the OIDC credential source (optional)"
+    description: "Ryvn CLI release to install; must be v1.254.0 or newer (the registry-config, chart and image commands, artifact digests). Defaults to v1.254.0 (optional)"
     required: false
     default: ""
   ryvn_api_url:
@@ -85,10 +85,24 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # Registry login, chart packaging/publishing and image inspection are CLI
+    # commands, so the default is the oldest release that carries them. An
+    # older explicit pin fails at the first missing command.
     - name: Install Ryvn CLI
       uses: ryvn-technologies/install-ryvn-cli@v1.0.0
       env:
-        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version }}
+        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.254.0' }}
+
+    # One private directory per invocation for every transient file (service
+    # and registry metadata, registry config, chart package, artifacts) so
+    # several invocations in one job never see each other's state and nothing
+    # is written into the checkout. Removed by the cleanup step.
+    - name: Create build workspace
+      id: workspace
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "dir=$(mktemp -d "$RUNNER_TEMP/ryvn-build.XXXXXX")" >> "$GITHUB_OUTPUT"
 
     - name: Print Runner Info
       shell: bash
@@ -104,56 +118,79 @@ runs:
       env:
         # Empty when the caller relies on keyless CI auth: the CLI exchanges the
         # job's GitHub OIDC token itself and uses these only as the documented
-        # fallback.
+        # fallback. Hub inputs override the job environment for this step only.
         RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
         RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
+        RYVN_API_URL: ${{ inputs.ryvn_api_url || env.RYVN_API_URL }}
+        RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url || env.RYVN_AUTH_URL }}
+        RYVN_ORG_ID: ${{ inputs.ryvn_org_id || env.RYVN_ORG_ID }}
+        RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id || env.RYVN_PROJECT_ID }}
+        SERVICE_NAME: ${{ inputs.service_name }}
+        BUILD_ONLY: ${{ inputs.build_only }}
+        USE_NIXPACKS: ${{ inputs.use_nixpacks }}
+        INPUT_BUILD_ARGS: ${{ inputs.build_args }}
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
       run: |
-        # Set RYVN_API_URL only if provided
-        if [ -n "${{ inputs.ryvn_api_url }}" ]; then
-          export RYVN_API_URL="${{ inputs.ryvn_api_url }}"
-        fi
+        set -euo pipefail
+        service_json="$WORKSPACE/service.json"
+        ryvn get service "$SERVICE_NAME" -o json > "$service_json"
+        echo "Service details: $(cat "$service_json")"
 
-        # Set RYVN_ORG_ID only if provided
-        if [ -n "${{ inputs.ryvn_org_id }}" ]; then
-          export RYVN_ORG_ID="${{ inputs.ryvn_org_id }}"
-        fi
-
-        # Set RYVN_AUTH_URL only if provided
-        if [ -n "${{ inputs.ryvn_auth_url }}" ]; then
-          export RYVN_AUTH_URL="${{ inputs.ryvn_auth_url }}"
-        fi
-
-        # Set RYVN_PROJECT_ID only if provided
-        if [ -n "${{ inputs.ryvn_project_id }}" ]; then
-          export RYVN_PROJECT_ID="${{ inputs.ryvn_project_id }}"
-        fi
-
-        # Get service details
-        ryvn get service ${{ inputs.service_name }} -o json > service.json
-
-        echo "Service details: $(cat service.json)"
-
-        # Extract and validate service type
-        service_type=$(jq -r '.definition.type' service.json)
+        service_type=$(jq -r '.definition.type' "$service_json")
         if [ "$service_type" = "null" ] || [ -z "$service_type" ]; then
           echo "Error: service type not found in service definition"
           exit 1
         fi
 
+        container_build=false
+        case "$service_type" in
+          web-server.v1|job.v1) container_build=true ;;
+        esac
+        image_ref=""
+        if [ "$container_build" = "true" ]; then
+          image_ref=$(jq -r '.definition.image // ""' "$service_json")
+          if [ -z "$image_ref" ]; then
+            echo "Error: $service_type service has no image publish destination"
+            exit 1
+          fi
+        fi
+
+        # The registry the service is bound to decides how the runner logs in
+        # (Ryvn-managed ECR: AWS role; Google Artifact Registry: ryvn create
+        # registry-config). Destinations are resolved by the CLI at push time.
+        # build_only needs no registry. Reading it needs registry.read.
+        registry_provider=""
+        if [ "$BUILD_ONLY" != "true" ] && { [ "$container_build" = "true" ] || [ "$service_type" = "helm-chart.v1" ]; }; then
+          registry_name=$(jq -r '.definition.registry // "ryvn-registry"' "$service_json")
+          if ! ryvn get registry "$registry_name" -o json > "$WORKSPACE/registry.json"; then
+            echo "::error::cannot read registry '$registry_name' bound to service $SERVICE_NAME (needs registry.read)"
+            exit 1
+          fi
+          registry_type=$(jq -r '.definition.type // ""' "$WORKSPACE/registry.json")
+          case "$registry_type" in
+            elasticContainerRegistry) registry_provider=ecr ;;
+            googleArtifactRegistry) registry_provider=gar ;;
+            *)
+              echo "::error::registry '$registry_name' (type '$registry_type') is not a Ryvn-managed ECR or Google Artifact Registry; ryvn-build-action cannot publish to it"
+              exit 1
+              ;;
+          esac
+        fi
+
         # Extract and validate working directory
-        working_dir=$(jq -r '.definition.build.workingDir' service.json)
-        if ([ "$working_dir" = "null" ] || [ -z "$working_dir" ]) && ([ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]); then
+        working_dir=$(jq -r '.definition.build.workingDir' "$service_json")
+        if ([ "$working_dir" = "null" ] || [ -z "$working_dir" ]) && [ "$container_build" = "true" ]; then
           echo "Error: working_dir not found in service definition"
           exit 1
         fi
 
         # Extract build command and buildpack for nixpacks first
-        build_command=$(jq -r '.definition.build.command // ""' service.json)
-        buildpack=$(jq -r '.definition.build.buildpack' service.json)
+        build_command=$(jq -r '.definition.build.command // ""' "$service_json")
+        buildpack=$(jq -r '.definition.build.buildpack' "$service_json")
 
         # Extract and validate dockerfile path (only required if not using buildpack/nixpacks)
-        dockerfile_path=$(jq -r '.definition.build.dockerfilePath' service.json)
-        if ([ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]) && ([ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]) && [ "${{ inputs.use_nixpacks }}" != "true" ] && [ "$buildpack" != "nixpack" ]; then
+        dockerfile_path=$(jq -r '.definition.build.dockerfilePath' "$service_json")
+        if ([ "$dockerfile_path" = "null" ] || [ -z "$dockerfile_path" ]) && [ "$container_build" = "true" ] && [ "$USE_NIXPACKS" != "true" ] && [ "$buildpack" != "nixpack" ]; then
           echo "Error: dockerfile_path not found in service definition"
           exit 1
         fi
@@ -165,92 +202,78 @@ runs:
         fi
 
         # Check if dockerBuildArgs exists and is not null
-        if [ "$(jq -r '.definition.build.dockerBuildArgs != null' service.json)" = "true" ]; then
+        if [ "$(jq -r '.definition.build.dockerBuildArgs != null' "$service_json")" = "true" ]; then
           # Extract and convert build args to multi-line format
-          service_build_args=$(jq -r '.definition.build.dockerBuildArgs | to_entries | map("\(.key)=\(.value)") | join("\n")' service.json)
+          service_build_args=$(jq -r '.definition.build.dockerBuildArgs | to_entries | map("\(.key)=\(.value)") | join("\n")' "$service_json")
 
           # Resolve ${VAR} references in build args from environment variables
           service_build_args=$(echo "$service_build_args" | envsubst)
 
           # If workflow build args are not specified, use service build args
-          if [ -z "${{ inputs.build_args }}" ]; then
+          if [ -z "$INPUT_BUILD_ARGS" ]; then
             echo "Using build args from service definition"
             echo "build_args<<EOF" >> $GITHUB_OUTPUT
             echo "$service_build_args" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
           else
             echo "Using build args from workflow input"
-            echo "build_args=${{ inputs.build_args }}" >> $GITHUB_OUTPUT
+            echo "build_args=$INPUT_BUILD_ARGS" >> $GITHUB_OUTPUT
           fi
         else
-          echo "build_args=${{ inputs.build_args }}" >> $GITHUB_OUTPUT
-        fi
-
-        # Extract and validate canonical image reference. For ryvn-built
-        # services the backend writes the full host+path ref into
-        # `definition.image` (e.g.
-        # `703671917981.dkr.ecr.us-east-1.amazonaws.com/<org>/<svc>`),
-        # so we no longer need to concatenate registry_url + imageName
-        # ourselves. The legacy `imageName` field was removed from the
-        # API response in the spec_revision cleanup.
-        image_ref=$(jq -r '.definition.image' service.json)
-        if ([ "$image_ref" = "null" ] || [ -z "$image_ref" ]) && ([ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]); then
-          echo "Error: definition.image not found in service definition"
-          exit 1
+          echo "build_args=$INPUT_BUILD_ARGS" >> $GITHUB_OUTPUT
         fi
 
         # Extract and validate helm chart path
-        helm_chart_path=$(jq -r '.definition.build.chartPath' service.json)
+        helm_chart_path=$(jq -r '.definition.build.chartPath' "$service_json")
         if ([ "$helm_chart_path" = "null" ] || [ -z "$helm_chart_path" ]) && [ "$service_type" = "helm-chart.v1" ]; then
           echo "Error: chartPath not found in service definition"
           exit 1
         fi
 
-        chart_repo=$(jq -r '.definition.chartRepository' service.json)
-        if ([ "$chart_repo" = "null" ] || [ -z "$chart_repo" ]) && [ "$service_type" = "helm-chart.v1" ]; then
-          echo "Error: chartRepository not found in service definition"
-          exit 1
-        fi
-
         # Extract and validate orgId
-        org_id=$(jq -r '.orgId' service.json)
+        org_id=$(jq -r '.orgId' "$service_json")
         if [ "$org_id" = "null" ] || [ -z "$org_id" ]; then
           echo "Error: orgId not found in service definition"
           exit 1
         fi
 
-        # Set static registry values
-        registry_url="703671917981.dkr.ecr.us-east-1.amazonaws.com"
-        role_arn="arn:aws:iam::703671917981:role/${org_id}-github-actions"
-        region="us-east-1"
+        # Legacy ECR publishing assumes the org's GitHub Actions role.
+        role_arn=""
+        region=""
+        if [ "$registry_provider" = "ecr" ]; then
+          role_arn="arn:aws:iam::703671917981:role/${org_id}-github-actions"
+          region="us-east-1"
+        fi
 
         # Set outputs
         echo "service_type=$service_type" >> $GITHUB_OUTPUT
+        echo "container_build=$container_build" >> $GITHUB_OUTPUT
+        echo "image_ref=$image_ref" >> $GITHUB_OUTPUT
+        echo "registry_provider=$registry_provider" >> $GITHUB_OUTPUT
         echo "helm_chart_path=$helm_chart_path" >> $GITHUB_OUTPUT
-        echo "chart_repo=$chart_repo" >> $GITHUB_OUTPUT
         echo "working_dir=$working_dir" >> $GITHUB_OUTPUT
         echo "dockerfile_path=$dockerfile_path" >> $GITHUB_OUTPUT
-        echo "registry_url=$registry_url" >> $GITHUB_OUTPUT
         echo "role_arn=$role_arn" >> $GITHUB_OUTPUT
         echo "region=$region" >> $GITHUB_OUTPUT
-        echo "image_ref=$image_ref" >> $GITHUB_OUTPUT
         echo "build_command=$build_command" >> $GITHUB_OUTPUT
         echo "use_nixpacks_from_service=$use_nixpacks_from_service" >> $GITHUB_OUTPUT
 
     - name: Configure AWS credentials
-      if: inputs.build_only != 'true'
+      if: inputs.build_only != 'true' && steps.service.outputs.registry_provider == 'ecr'
       uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: ${{ steps.service.outputs.role_arn }}
         aws-region: ${{ steps.service.outputs.region }}
 
+    # The ECR login lands in the runner's Docker config; ryvn push chart is
+    # pointed at that same file, so Helm charts need no helm registry login.
     - name: Login to Amazon ECR
-      if: inputs.build_only != 'true'
+      if: inputs.build_only != 'true' && steps.service.outputs.registry_provider == 'ecr'
       uses: aws-actions/amazon-ecr-login@v2
 
     # Docker Image Steps
     - name: Extract Docker metadata
-      if: steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1'
+      if: steps.service.outputs.container_build == 'true'
       id: meta
       uses: docker/metadata-action@v5
       with:
@@ -260,9 +283,59 @@ runs:
           type=sha
           type=ref,event=pr
 
+    # Standard Docker Build Steps - only run if not using Nixpacks. The
+    # builder is created in the caller's DOCKER_CONFIG before the GAR login
+    # switches to a disposable copy (which pins BUILDX_CONFIG back to the
+    # caller's), so the setup action's post-job cleanup still finds it.
+    - name: Set up Docker Buildx (Blacksmith)
+      if: steps.service.outputs.container_build == 'true' && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
+      uses: useblacksmith/setup-docker-builder@v2
+      with:
+        cache-key: ${{ inputs.service_name }}
+
+    - name: Set up Docker Buildx (Docker)
+      if: steps.service.outputs.container_build == 'true' && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
+      uses: docker/setup-buildx-action@v4
+      with:
+        version: latest
+        endpoint: ${{ inputs.buildx_endpoint }}
+        driver: ${{ inputs.buildx_driver }}
+
+    # Google Artifact Registry: ryvn create registry-config mints a one-hour
+    # credential right before the build and writes a disposable Docker/Helm
+    # config in the workspace (seeded from the caller's config, credential
+    # helpers and other registries untouched). Its env is exported for the
+    # build, push, inspection and chart steps; the cleanup step restores the
+    # previous values and removes the workspace. Builds that outlive the credential fail at
+    # push time; see README.
+    - name: Login to Google Artifact Registry
+      if: inputs.build_only != 'true' && steps.service.outputs.registry_provider == 'gar'
+      shell: bash
+      env:
+        RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
+        RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
+        RYVN_API_URL: ${{ inputs.ryvn_api_url || env.RYVN_API_URL }}
+        RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url || env.RYVN_AUTH_URL }}
+        RYVN_ORG_ID: ${{ inputs.ryvn_org_id || env.RYVN_ORG_ID }}
+        RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id || env.RYVN_PROJECT_ID }}
+        SERVICE_NAME: ${{ inputs.service_name }}
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
+      run: |
+        set -euo pipefail
+        ryvn create registry-config "$WORKSPACE/registry-config" --service "$SERVICE_NAME" -o json > "$WORKSPACE/registry-config.json"
+        {
+          echo "RYVN_REGISTRY_CONFIG_ACTIVE=true"
+          echo "RYVN_ORIGINAL_DOCKER_CONFIG=${DOCKER_CONFIG-}"
+          echo "RYVN_ORIGINAL_HELM_REGISTRY_CONFIG=${HELM_REGISTRY_CONFIG-}"
+          echo "RYVN_ORIGINAL_BUILDX_CONFIG=${BUILDX_CONFIG-}"
+          echo "RYVN_ORIGINAL_DOCKER_CERT_PATH=${DOCKER_CERT_PATH-}"
+          jq -r '.env | to_entries[] | "\(.key)=\(.value)"' "$WORKSPACE/registry-config.json"
+        } >> "$GITHUB_ENV"
+        jq -r '"Logged in to \(.server) as \(.username) until \(.expiresAt)"' "$WORKSPACE/registry-config.json"
+
     # Nixpacks Build and Push (with build command)
     - name: Build and push with Nixpacks (with build command)
-      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && (inputs.use_nixpacks == 'true' || steps.service.outputs.use_nixpacks_from_service == 'true') && steps.service.outputs.build_command != ''
+      if: steps.service.outputs.container_build == 'true' && (inputs.use_nixpacks == 'true' || steps.service.outputs.use_nixpacks_from_service == 'true') && steps.service.outputs.build_command != ''
       uses: iloveitaly/github-action-nixpacks@main
       with:
         context: ${{ steps.service.outputs.working_dir }}
@@ -278,7 +351,7 @@ runs:
 
     # Nixpacks Build and Push (without build command)
     - name: Build and push with Nixpacks (without build command)
-      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && (inputs.use_nixpacks == 'true' || steps.service.outputs.use_nixpacks_from_service == 'true') && steps.service.outputs.build_command == ''
+      if: steps.service.outputs.container_build == 'true' && (inputs.use_nixpacks == 'true' || steps.service.outputs.use_nixpacks_from_service == 'true') && steps.service.outputs.build_command == ''
       uses: iloveitaly/github-action-nixpacks@main
       with:
         context: ${{ steps.service.outputs.working_dir }}
@@ -292,47 +365,9 @@ runs:
         cache_tag: ${{ steps.service.outputs.image_ref }}:cache
         env: ${{ steps.service.outputs.build_args }}
 
-    # Standard Docker Build Steps - only run if not using Nixpacks
-    - name: Set up Docker Buildx (Blacksmith)
-      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
-      uses: useblacksmith/setup-docker-builder@v1
-
-    - name: Set up Docker Buildx (Docker)
-      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
-      uses: docker/setup-buildx-action@v3
-      with:
-        version: latest
-        endpoint: ${{ inputs.buildx_endpoint }}
-        driver: ${{ inputs.buildx_driver }}
-
-    - name: Determine Docker output mode
-      id: docker_output
-      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
-      shell: bash
-      env:
-        BUILD_ONLY: ${{ inputs.build_only }}
-        PLATFORMS: ${{ inputs.platforms }}
-      run: |
-        set -euo pipefail
-
-        platform_count="$(
-          printf '%s\n' "$PLATFORMS" |
-            tr ',' '\n' |
-            sed '/^[[:space:]]*$/d' |
-            wc -l |
-            tr -d '[:space:]'
-        )"
-
-        load_image=false
-        if [[ "$BUILD_ONLY" == "true" && "$platform_count" == "1" ]]; then
-          load_image=true
-        fi
-
-        echo "load_image=$load_image" >> "$GITHUB_OUTPUT"
-
     - name: Build and push Docker image (Blacksmith)
       id: build_blacksmith
-      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
+      if: steps.service.outputs.container_build == 'true' && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
       uses: useblacksmith/build-push-action@v2
       with:
         context: ${{ steps.service.outputs.working_dir }}
@@ -343,12 +378,11 @@ runs:
         build-args: ${{ steps.service.outputs.build_args }}
         secrets: ${{ inputs.build_secrets }}
         platforms: ${{ inputs.platforms }}
-        load: ${{ steps.docker_output.outputs.load_image }}
 
     - name: Build and push Docker image (Docker)
       id: build_docker
-      if: (steps.service.outputs.service_type == 'web-server.v1' || steps.service.outputs.service_type == 'job.v1') && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
-      uses: docker/build-push-action@v5
+      if: steps.service.outputs.container_build == 'true' && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
+      uses: docker/build-push-action@v7
       with:
         context: ${{ steps.service.outputs.working_dir }}
         file: ${{ steps.service.outputs.dockerfile_path }}
@@ -360,15 +394,11 @@ runs:
         cache-from: ${{ inputs.disable_cache != 'true' && format('type=gha,scope={0}', inputs.service_name) || '' }}
         cache-to: ${{ inputs.disable_cache != 'true' && format('type=gha,mode=max,scope={0}', inputs.service_name) || '' }}
         platforms: ${{ inputs.platforms }}
-        load: ${{ steps.docker_output.outputs.load_image }}
 
-    # Helm Chart Steps
-    - name: Install Helm
-      if: steps.service.outputs.service_type == 'helm-chart.v1'
-      uses: azure/setup-helm@v3
-      with:
-        version: v3.12.1
-
+    # Helm Chart Steps: packaging is local (no credential); the push resolves
+    # the service's chart destination and authenticates from the GAR
+    # registry-config env or, on ECR, the Docker config the ECR login wrote
+    # (selected explicitly so a stale HELM_REGISTRY_CONFIG cannot shadow it).
     - name: Package Helm Chart
       id: helm_package
       if: steps.service.outputs.service_type == 'helm-chart.v1'
@@ -376,230 +406,100 @@ runs:
       env:
         CHART_PATH: ${{ steps.service.outputs.helm_chart_path }}
         VERSION: ${{ inputs.version }}
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
       run: |
         set -euo pipefail
-
-        chart_name="$(yq -er 'select(has("name")) | .name | tostring' "$CHART_PATH/Chart.yaml")"
-        chart_package="${PWD}/${chart_name}-${VERSION}.tgz"
-
-        helm package "$CHART_PATH" --version "$VERSION"
-
-        if [[ ! -f "$chart_package" ]]; then
-          echo "::error::expected Helm package '$chart_package'"
-          exit 1
-        fi
-
-        echo "Packaged chart '$chart_name' version '$VERSION' -> $chart_package"
-        echo "chart_package=$chart_package" >> "$GITHUB_OUTPUT"
-        echo "chart_name=$chart_name" >> "$GITHUB_OUTPUT"
-
-    - name: Login to Helm Registry
-      if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
-      shell: bash
-      run: |
-        aws ecr get-login-password --region ${{ steps.service.outputs.region }} | helm registry login --username AWS --password-stdin ${{ steps.service.outputs.registry_url }}
+        ryvn package chart "$CHART_PATH" --version "$VERSION" --destination "$WORKSPACE/chart" -o json > "$WORKSPACE/chart-package.json"
+        echo "chart_package=$(jq -r '.path' "$WORKSPACE/chart-package.json")" >> "$GITHUB_OUTPUT"
 
     - name: Push Helm Chart to Registry
-      id: helm_push
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
       shell: bash
       env:
+        RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
+        RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
+        RYVN_API_URL: ${{ inputs.ryvn_api_url || env.RYVN_API_URL }}
+        RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url || env.RYVN_AUTH_URL }}
+        RYVN_ORG_ID: ${{ inputs.ryvn_org_id || env.RYVN_ORG_ID }}
+        RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id || env.RYVN_PROJECT_ID }}
+        SERVICE_NAME: ${{ inputs.service_name }}
         CHART_PACKAGE: ${{ steps.helm_package.outputs.chart_package }}
-        REGISTRY_URL: ${{ steps.service.outputs.registry_url }}
-        CHART_REPO: ${{ steps.service.outputs.chart_repo }}
+        REGISTRY_PROVIDER: ${{ steps.service.outputs.registry_provider }}
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
       run: |
         set -euo pipefail
+        args=(push chart "$CHART_PACKAGE" --service "$SERVICE_NAME" -o artifact)
+        if [[ "$REGISTRY_PROVIDER" == "ecr" ]]; then
+          args+=(--registry-config "${DOCKER_CONFIG:-$HOME/.docker}/config.json")
+        fi
+        ryvn "${args[@]}" > "$WORKSPACE/artifacts.json"
 
-        # helm appends the packaged chart's name to this prefix, so the push
-        # lands on <chartRepository>/<Chart.yaml name> under the org's ECR path.
-        repo_url="oci://${REGISTRY_URL}/${CHART_REPO}"
+    # The pushed image must resolve in the registry. When the build step
+    # reports a push digest (Nixpacks does not) that exact content is
+    # inspected, even if the tag has since moved; the tag itself is not
+    # re-checked. build_only pushes nothing, so there is nothing to describe.
+    - name: Describe container image
+      if: steps.service.outputs.container_build == 'true' && inputs.build_only != 'true'
+      shell: bash
+      env:
+        IMAGE_REFERENCE: ${{ steps.service.outputs.image_ref }}:${{ steps.meta.outputs.version }}
+        SERVICE_NAME: ${{ inputs.service_name }}
+        DIGEST: ${{ steps.build_docker.outputs.digest || steps.build_blacksmith.outputs.digest }}
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
+      run: |
+        set -euo pipefail
+        args=(describe image "$IMAGE_REFERENCE" --service "$SERVICE_NAME" -o artifact)
+        if [[ -n "$DIGEST" ]]; then
+          args+=(--digest "$DIGEST")
+        fi
+        ryvn "${args[@]}" > "$WORKSPACE/artifacts.json"
 
-        # helm reports "Pushed:"/"Digest:" on stderr; tee keeps them in the log
-        # so a failed push still shows why it failed.
-        push_log="$(mktemp)"
-        helm push "$CHART_PACKAGE" "$repo_url" 2>&1 | tee "$push_log"
-
-        echo "repo_url=$repo_url" >> "$GITHUB_OUTPUT"
-        echo "digest=$(awk '/^Digest:/ { print $2; exit }' "$push_log")" >> "$GITHUB_OUTPUT"
-
+    # One service produces at most one artifact array (push chart or describe
+    # image, never both); build_only produces none.
     - name: Emit build artifacts
       id: artifacts
       shell: bash
       env:
-        SERVICE_TYPE: ${{ steps.service.outputs.service_type }}
-        SERVICE_NAME: ${{ inputs.service_name }}
-        VERSION: ${{ inputs.version }}
-        IMAGE_REPOSITORY: ${{ steps.service.outputs.image_ref }}
-        IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
-        BUILD_ONLY: ${{ inputs.build_only }}
-        DOCKER_DIGEST: ${{ steps.build_docker.outputs.digest }}
-        BLACKSMITH_DIGEST: ${{ steps.build_blacksmith.outputs.digest }}
-        HELM_CHART_NAME: ${{ steps.helm_package.outputs.chart_name }}
-        HELM_REPO_URL: ${{ steps.helm_push.outputs.repo_url }}
-        HELM_DIGEST: ${{ steps.helm_push.outputs.digest }}
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
       run: |
         set -euo pipefail
-
-        if [[ "$SERVICE_TYPE" == "helm-chart.v1" ]]; then
-          if [[ "$BUILD_ONLY" == "true" ]]; then
-            # The chart was packaged locally but was not published.
-            build_artifacts='[]'
-          else
-            : "${HELM_REPO_URL:?Helm push did not emit repo_url}"
-            : "${HELM_CHART_NAME:?Helm package did not emit chart_name}"
-            : "${HELM_DIGEST:?Helm push did not emit digest}"
-            if [[ ! "$HELM_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::helm push reported an unusable chart digest '$HELM_DIGEST'"
-              exit 1
-            fi
-            echo "Published chart digest: ${HELM_REPO_URL}/${HELM_CHART_NAME}@${HELM_DIGEST}"
-
-            build_artifacts="$(jq -cn \
-              --arg name "$SERVICE_NAME" \
-              --arg repoUrl "$HELM_REPO_URL" \
-              --arg chartName "$HELM_CHART_NAME" \
-              --arg version "$VERSION" \
-              --arg digest "$HELM_DIGEST" \
-              '[{
-                name: $name,
-                type: "helm-chart",
-                helmChart: {
-                  repoUrl: $repoUrl,
-                  chartName: $chartName,
-                  version: $version,
-                  digest: $digest
-                }
-              }]')"
-          fi
-
-          {
-            echo "build_artifacts<<EOF"
-            echo "$build_artifacts"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-          exit 0
+        artifacts="[]"
+        if [[ -s "$WORKSPACE/artifacts.json" ]]; then
+          artifacts="$(jq -c . "$WORKSPACE/artifacts.json")"
         fi
-
-        if [[ "$SERVICE_TYPE" != "web-server.v1" && "$SERVICE_TYPE" != "job.v1" ]]; then
-          echo 'build_artifacts=[]' >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        # Prefer the expected semver tag, but fall back to the first metadata-action tag.
-        image_ref="${IMAGE_REPOSITORY}:${VERSION}"
-        if ! printf '%s\n' "$IMAGE_TAGS" | grep -qxF "$image_ref"; then
-          first_tag="$(printf '%s\n' "$IMAGE_TAGS" | sed '/^[[:space:]]*$/d' | head -n1 || true)"
-          if [[ -n "$first_tag" ]]; then
-            image_ref="$first_tag"
-          fi
-        fi
-
-        image_repository="${image_ref%:*}"
-        image_tag="${image_ref##*:}"
-
-        # The published image's immutable identity. build-push-action (and the
-        # Blacksmith fork) report the digest of what they pushed — for a
-        # multi-platform build that is the image index, not one platform's
-        # manifest. The Nixpacks action reports nothing, so the registry is
-        # asked what the tag we just pushed resolves to. The release records
-        # this digest so a later push to the same tag can never change which
-        # content the release means.
-        digest="${DOCKER_DIGEST:-${BLACKSMITH_DIGEST:-}}"
-        if [[ "$digest" == "null" ]]; then
-          digest=""
-        fi
-        if [[ "$BUILD_ONLY" == "true" ]]; then
-          # Nothing was published, so there is no registry digest to record.
-          digest=""
-        else
-          registry_digest=""
-          if registry_digest="$(docker buildx imagetools inspect "$image_ref" --format '{{.Manifest.Digest}}')"; then
-            registry_digest="$(tr -d '[:space:]' <<<"$registry_digest")"
-          else
-            echo "::warning::could not read the registry digest of $image_ref"
-            registry_digest=""
-          fi
-          if [[ -z "$digest" ]]; then
-            digest="$registry_digest"
-          elif [[ -n "$registry_digest" && "$registry_digest" != "$digest" ]]; then
-            # Another push moved the tag between our push and this check; the
-            # release cannot say which content it means, so fail here rather
-            # than record either one.
-            echo "::error::pushed $image_ref as $digest but the tag now resolves to $registry_digest; the tag was overwritten by another push"
-            exit 1
-          fi
-          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::could not determine the digest of the published image $image_ref (got '${digest:-<none>}'); the release would have no immutable identity"
-            exit 1
-          fi
-          echo "Published image digest: ${image_repository}@${digest}"
-        fi
-
-        if [[ -n "$digest" ]]; then
-          inspect_ref="${image_repository}@${digest}"
-        else
-          inspect_ref="$image_ref"
-        fi
-
-        exposed_ports='null'
-        exposed_ports_source=''
-
-        if [[ "$BUILD_ONLY" != "true" ]]; then
-          # This reads the registry manifest/config; it does not pull image layers.
-          if image_json="$(docker buildx imagetools inspect "$inspect_ref" --format '{{json .Image}}')"; then
-            # Single-platform image: .Image is the image config.
-            # Multi-platform image: .Image is a map of platform -> image config.
-            if jq -e 'type == "object" and has("config")' >/dev/null <<<"$image_json"; then
-              exposed_ports="$(jq -c '(.config.ExposedPorts // {}) | keys | sort' <<<"$image_json")"
-            else
-              exposed_ports="$(jq -c '
-                [
-                  to_entries[]
-                  | ((.value.config.ExposedPorts? // {}) | keys[])
-                ]
-                | unique
-                | sort
-              ' <<<"$image_json")"
-            fi
-
-            exposed_ports_source='image'
-          else
-            echo "::warning::could not inspect image config for exposed ports: $inspect_ref"
-          fi
-        elif docker image inspect "$image_ref" >/tmp/ryvn-image-inspect.json 2>/dev/null; then
-          # Local fallback for build_only=true when the image was loaded into Docker.
-          exposed_ports="$(jq -c '.[0].Config.ExposedPorts // {} | keys | sort' /tmp/ryvn-image-inspect.json)"
-          exposed_ports_source='image'
-        else
-          echo "::warning::build_only=true and image was not pushed or loaded locally; cannot read exposedPorts without pulling/exporting the image."
-        fi
-
-        build_artifacts="$(jq -cn \
-          --arg name "$SERVICE_NAME" \
-          --arg repository "$image_repository" \
-          --arg tag "$image_tag" \
-          --arg digest "$digest" \
-          --argjson exposedPorts "$exposed_ports" \
-          --arg exposedPortsSource "$exposed_ports_source" \
-          '[{
-            name: $name,
-            image: ({
-              repository: $repository,
-              tag: $tag
-            } + (if $digest == "" then {} else {
-              digest: $digest
-            } end) + (if $exposedPortsSource == "" then {} else {
-              exposedPorts: $exposedPorts,
-              exposedPortsSource: $exposedPortsSource
-            } end))
-          }]'
-        )"
-
+        echo "Build artifacts: $artifacts"
         {
-          echo "build_artifacts<<EOF"
-          echo "$build_artifacts"
-          echo "EOF"
+          echo "build_artifacts<<RYVN_ARTIFACTS_EOF"
+          echo "$artifacts"
+          echo "RYVN_ARTIFACTS_EOF"
         } >> "$GITHUB_OUTPUT"
+
+    # The workspace is this invocation's own mktemp directory: the registry
+    # credentials live in it, as does whatever Docker writes into a
+    # $DOCKER_CONFIG during a build (.token_seed, .token_seed.lock). Ordinary
+    # temp-directory lifecycle: restore the environment the login step replaced,
+    # then remove the whole workspace. The caller's original Docker/Helm/buildx
+    # directories are never touched. (`ryvn delete registry-config` is for a
+    # config placed inside a shared directory; here nothing else lives in it.)
+    - name: Restore registry environment and remove workspace
+      if: always() && steps.workspace.outputs.dir != ''
+      shell: bash
+      env:
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
+      run: |
+        set +e -uo pipefail
+        status=0
+        if [[ "${RYVN_REGISTRY_CONFIG_ACTIVE-}" == "true" ]]; then
+          {
+            echo "RYVN_REGISTRY_CONFIG_ACTIVE="
+            echo "DOCKER_CONFIG=${RYVN_ORIGINAL_DOCKER_CONFIG-}"
+            echo "HELM_REGISTRY_CONFIG=${RYVN_ORIGINAL_HELM_REGISTRY_CONFIG-}"
+            echo "BUILDX_CONFIG=${RYVN_ORIGINAL_BUILDX_CONFIG-}"
+            echo "DOCKER_CERT_PATH=${RYVN_ORIGINAL_DOCKER_CERT_PATH-}"
+          } >> "$GITHUB_ENV" || status=$?
+        fi
+        rm -rf "$WORKSPACE" || status=$?
+        exit "$status"
 
 branding:
   icon: "package"
