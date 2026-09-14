@@ -448,6 +448,11 @@ runs:
             : "${HELM_REPO_URL:?Helm push did not emit repo_url}"
             : "${HELM_CHART_NAME:?Helm package did not emit chart_name}"
             : "${HELM_DIGEST:?Helm push did not emit digest}"
+            if [[ ! "$HELM_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::helm push reported an unusable chart digest '$HELM_DIGEST'"
+              exit 1
+            fi
+            echo "Published chart digest: ${HELM_REPO_URL}/${HELM_CHART_NAME}@${HELM_DIGEST}"
 
             build_artifacts="$(jq -cn \
               --arg name "$SERVICE_NAME" \
@@ -492,9 +497,45 @@ runs:
         image_repository="${image_ref%:*}"
         image_tag="${image_ref##*:}"
 
-        # Prefer an immutable digest when build-push-action provided one.
+        # The published image's immutable identity. build-push-action (and the
+        # Blacksmith fork) report the digest of what they pushed — for a
+        # multi-platform build that is the image index, not one platform's
+        # manifest. The Nixpacks action reports nothing, so the registry is
+        # asked what the tag we just pushed resolves to. The release records
+        # this digest so a later push to the same tag can never change which
+        # content the release means.
         digest="${DOCKER_DIGEST:-${BLACKSMITH_DIGEST:-}}"
-        if [[ -n "$digest" && "$digest" != "null" ]]; then
+        if [[ "$digest" == "null" ]]; then
+          digest=""
+        fi
+        if [[ "$BUILD_ONLY" == "true" ]]; then
+          # Nothing was published, so there is no registry digest to record.
+          digest=""
+        else
+          registry_digest=""
+          if registry_digest="$(docker buildx imagetools inspect "$image_ref" --format '{{.Manifest.Digest}}')"; then
+            registry_digest="$(tr -d '[:space:]' <<<"$registry_digest")"
+          else
+            echo "::warning::could not read the registry digest of $image_ref"
+            registry_digest=""
+          fi
+          if [[ -z "$digest" ]]; then
+            digest="$registry_digest"
+          elif [[ -n "$registry_digest" && "$registry_digest" != "$digest" ]]; then
+            # Another push moved the tag between our push and this check; the
+            # release cannot say which content it means, so fail here rather
+            # than record either one.
+            echo "::error::pushed $image_ref as $digest but the tag now resolves to $registry_digest; the tag was overwritten by another push"
+            exit 1
+          fi
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::could not determine the digest of the published image $image_ref (got '${digest:-<none>}'); the release would have no immutable identity"
+            exit 1
+          fi
+          echo "Published image digest: ${image_repository}@${digest}"
+        fi
+
+        if [[ -n "$digest" ]]; then
           inspect_ref="${image_repository}@${digest}"
         else
           inspect_ref="$image_ref"
@@ -537,6 +578,7 @@ runs:
           --arg name "$SERVICE_NAME" \
           --arg repository "$image_repository" \
           --arg tag "$image_tag" \
+          --arg digest "$digest" \
           --argjson exposedPorts "$exposed_ports" \
           --arg exposedPortsSource "$exposed_ports_source" \
           '[{
@@ -544,10 +586,12 @@ runs:
             image: ({
               repository: $repository,
               tag: $tag
-            } + if $exposedPortsSource == "" then {} else {
+            } + (if $digest == "" then {} else {
+              digest: $digest
+            } end) + (if $exposedPortsSource == "" then {} else {
               exposedPorts: $exposedPorts,
               exposedPortsSource: $exposedPortsSource
-            } end)
+            } end))
           }]'
         )"
 

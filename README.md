@@ -72,6 +72,26 @@ The reusable workflow also accepts an optional `tag_prefix` input (e.g. `gcp-gke
 | `nixpacks_apt`       | Additional Apt packages to install in the environment     | No       | `""`    |
 | `nixpacks_cache`     | Use the Nixpacks build cache                              | No       | `true`  |
 
+## Outputs
+
+| Name              | Description                                                                 |
+| ----------------- | --------------------------------------------------------------------------- |
+| `build_artifacts` | JSON array of the artifacts this run published, in the shape `ryvn create release --artifacts-file` accepts |
+
+For a container service the array holds one entry with the published image and, when the image was pushed, the digest the registry assigned. For a multi-platform build that is the digest of the image index. A pushed image whose digest cannot be determined fails the action, because the release would otherwise have no immutable identity.
+
+```json
+[{"name": "api", "image": {"repository": "…/acme/api", "tag": "1.2.3", "digest": "sha256:…", "exposedPorts": ["8080/tcp"], "exposedPortsSource": "image"}}]
+```
+
+For a Helm chart service it holds the pushed chart and its digest:
+
+```json
+[{"name": "my-chart", "type": "helm-chart", "helmChart": {"repoUrl": "oci://…/acme", "chartName": "my-chart", "version": "1.2.3", "digest": "sha256:…"}}]
+```
+
+With `build_only: true` nothing is published: container entries carry no digest and chart builds emit `[]`.
+
 ## Examples
 
 ### Basic usage with Docker
