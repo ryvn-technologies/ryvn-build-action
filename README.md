@@ -49,7 +49,7 @@ jobs:
 
 Set `ryvn_org_id` when more than one Ryvn organization trusts the same GitHub repository. Static credentials keep working unchanged for CI systems without OIDC and during the rollout.
 
-Keyless auth needs a Ryvn CLI with the OIDC credential source; there is no separate login step — every `ryvn` invocation exchanges the job's OIDC token on its own (cached within the process). Both the action and the reusable workflow (`.github/workflows/release.yml`) install the CLI and accept a `ryvn_cli_version` input (e.g. `v1.190.0`) to pin a release when the installer's default is older. A CLI that predates keyless auth ignores `id-token: write` and uses the static credentials if set; otherwise its first `ryvn` call fails on missing credentials.
+Keyless auth needs a Ryvn CLI with the OIDC credential source; there is no separate login step — every `ryvn` invocation exchanges the job's OIDC token on its own (cached within the process). Both the action and the reusable workflow (`.github/workflows/release.yml`) install the CLI and accept a `ryvn_cli_version` input (e.g. `v1.249.0`) to pin a release; when unset the action installs `v1.249.0`, the oldest release carrying the publishing commands (`create/delete registry-config`, `package chart`, `push chart`, `describe image`) and the managed Helm destination fix. An older explicit pin fails at the first missing command with the CLI's own `unknown command` error. A CLI that predates keyless auth ignores `id-token: write` and uses the static credentials if set; otherwise its first `ryvn` call fails on missing credentials.
 
 The reusable workflow inherits the `GITHUB_TOKEN` permissions granted by the calling job, so the caller decides the auth mode: `contents: write` plus `id-token: write` for keyless auth, or `contents: write` alone to force the static `RYVN_CLIENT_ID`/`RYVN_CLIENT_SECRET` credentials (e.g. for services whose spec has no GitHub `repo` locator, such as public terraform module `source`s).
 
@@ -65,7 +65,7 @@ The reusable workflow also accepts an optional `tag_prefix` input (e.g. `gcp-gke
 | `ryvn_client_id`     | Ryvn Client ID (static credentials; see Authentication)   | No       |         |
 | `ryvn_client_secret` | Ryvn Client Secret (static credentials; see Authentication)| No       |         |
 | `ryvn_org_id`        | Ryvn organization ID, for repositories trusted by more than one organization | No |   |
-| `ryvn_cli_version`   | Ryvn CLI release to install (e.g. `v1.190.0`); default is the installer's pin | No |   |
+| `ryvn_cli_version`   | Ryvn CLI release to install (must be `v1.249.0` or newer) | No | `v1.249.0` |
 | `build_args`         | Build arguments to pass to the Docker build               | No       |         |
 | `use_nixpacks`       | Use Nixpacks to build Docker images instead of Dockerfile | No       | `false` |
 | `nixpacks_pkgs`      | Additional Nix packages to install in the environment     | No       | `""`    |
@@ -154,17 +154,54 @@ jobs:
 
 ## How It Works
 
-This action:
+The action is orchestration only: runner setup, Buildx, `docker/build-push-action`, and step outputs. Everything that needs to know about Ryvn registries, Helm charts, or release artifacts is a Ryvn CLI command, so the same flow works from any CI system.
 
-1. Installs the Ryvn CLI
-2. Retrieves service configuration from Ryvn API
-3. Automatically detects build method:
+1. Installs the Ryvn CLI (`ryvn_cli_version`, default `v1.249.0`). Creates a private per-invocation workspace under `runner.temp` for every transient file (service and registry metadata, registry config, chart package, artifacts), so several invocations in one job never share state and nothing is written into the checkout; the `always()` cleanup step removes it.
+2. `ryvn get service <name> -o json` for the service definition; ordinary fields (`type`, `build.*`, `image`) become step outputs and build inputs. The `ryvn_api_url`/`ryvn_auth_url`/`ryvn_org_id`/`ryvn_project_id` inputs apply to the action's own CLI steps only (falling back to the job's `RYVN_*` environment); they are not exported to later steps.
+3. Detects the build method:
    - If `buildpack: "nixpack"` is set in service definition, uses Nixpacks with the service's build command
    - If `use_nixpacks: true` is provided as input, uses Nixpacks
    - Otherwise uses standard Docker build with Dockerfile
-4. Authenticates with AWS ECR
-5. Builds the Docker image or packages the Helm chart
-6. Pushes to the Ryvn Registry (unless `build_only` is set to true)
+4. Unless `build_only`, reads the bound registry (`ryvn get registry <definition.registry> -o json`) and routes on its `definition.type` — see Registries below.
+5. Container services: `docker/build-push-action` builds (and pushes) the image; `ryvn describe image <ref> --service <name> --allow-missing -o artifact` records digest and exposed ports (`--local` when `build_only`). As before, image metadata is best effort: an unreadable image keeps the repository/tag artifact and reports the cause; the push itself has already succeeded or failed.
+6. Helm services: `ryvn package chart <chartPath> --version <v> -o json` packages locally; `ryvn push chart <pkg> --service <name> -o artifact` resolves the service's chart destination and publishes.
+7. A service produces at most one artifact array (`describe image` or `push chart`; `[]` for a Helm `build_only` run), passed through as the `build_artifacts` output, which is exactly what `ryvn create release --artifacts-file` consumes.
+
+Buildable service types are `web-server.v1`, `job.v1` and `helm-chart.v1`.
+
+Helm charts are packaged from `definition.build.chartPath`. That field has always been required for a source-built `helm-chart.v1` (the API's `HelmChartBuildSettings` requires it and the action has always failed without it); the reusable release workflow checks it up front instead of failing later in the build step. No new Helm or action parameter is introduced.
+
+### The same flow outside GitHub Actions
+
+```bash
+ryvn create registry-config "$RUNNER_TEMP/ryvn-auth" --service api -o env > auth.env && . ./auth.env   # GAR; ECR keeps aws ecr get-login-password
+docker buildx build --push -t "$IMAGE:$VERSION" .
+ryvn describe image "$IMAGE:$VERSION" --service api -o artifact > image.json
+ryvn package chart ./chart --version "$VERSION" -o json                        # helm-chart.v1 only
+ryvn push chart "api-$VERSION.tgz" --service api -o artifact > chart.json
+jq -s 'add' image.json chart.json > artifacts.json                             # both are arrays
+ryvn create release --service api --version "$VERSION" --artifacts-file artifacts.json
+ryvn delete registry-config "$RUNNER_TEMP/ryvn-auth"
+```
+
+## Registries
+
+The bound registry's `definition.type` decides how the action authenticates; it is never derived from the organization name or from the image URL.
+
+| Registry type | Login |
+|---|---|
+| `elasticContainerRegistry` (Ryvn-managed ECR) | Assumes the org's GitHub Actions role and uses `amazon-ecr-login`, as before. `ryvn push chart --registry-config $DOCKER_CONFIG/config.json` reads that same Docker login, so no separate `helm registry login` is needed and a stale `HELM_REGISTRY_CONFIG` in the job cannot shadow it |
+| `googleArtifactRegistry` (Ryvn-managed Google Artifact Registry) | `ryvn create registry-config <dir> --service <name>` writes a disposable Docker/Helm config holding a short-lived token; the action exports its `DOCKER_CONFIG`/`HELM_REGISTRY_CONFIG` for the build, push, and inspect steps and runs `ryvn delete registry-config <dir>` in an `always()` cleanup step that restores the previous variables even if the deletion fails (the failure is still reported) |
+
+Any other registry type (including bring-your-own registries) fails with an explicit error rather than publishing with a different credential. If Ryvn refuses to issue credentials (missing `service.build`/`registry.publish`, publisher access not provisioned yet), the action fails; it never falls back to AWS or anonymous pushes. 
+**Release gate:** reading the bound registry (`ryvn get registry`) needs `registry.read` for every published build, ECR keyless CI included, not only Google Artifact Registry. The current `ci-release-publisher` role is service-scoped, so do not release action tags carrying this version until the scoped registry read + publish binding for CI publishers is deployed.
+
+Google Artifact Registry notes:
+
+- Credentials live for one hour and are issued immediately before the build-and-push step. A single build whose build-and-push phase takes longer than the credential lifetime will still fail at push time; split long builds or use `build_only` plus a separate publish job.
+- `create registry-config` seeds the disposable Docker config from the caller's (buildx builders, other registries and their `credsStore`/`credHelpers` stay as they are), pins only the GAR host to file-backed auth so the token is never handed to a credential helper that would keep it after cleanup, and preserves `DOCKER_CERT_PATH` so Docker TLS still finds the caller's certificates. The buildx builder is created before the switch to the isolated config, so `docker/setup-buildx-action`'s post-job cleanup still finds it. The password never reaches action logs or outputs.
+- `build_only: true` never requests publish credentials, logs in, reads the registry, or pushes; it only needs read access to the service, and inspects the built image from the local daemon.
+- The CLI steps read `RYVN_API_URL`/`RYVN_AUTH_URL`/`RYVN_PROJECT_ID`/`RYVN_ORG_ID` the same way the initial `ryvn get service` does: a job-level `env` value is inherited and the corresponding action input overrides it only when set, so credentials are always issued by the hub the service was read from.
 
 ## Nixpacks Configuration
 

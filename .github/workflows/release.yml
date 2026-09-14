@@ -103,12 +103,14 @@ jobs:
           if [ "$service_type" = "web-server.v1" ] || [ "$service_type" = "job.v1" ]; then
             echo "needs_build=true" >> $GITHUB_OUTPUT
           elif [ "$service_type" = "helm-chart.v1" ]; then
-            # Helm charts require chartRepository to build and release
-            chart_repo=$(echo "$service_json" | jq -r '.definition.chartRepository // ""')
-            if [ -n "$chart_repo" ] && [ "$chart_repo" != "null" ]; then
+            # Helm charts need a chart source to build; the publish destination
+            # (chartRepository on ECR, repoURL on Google Artifact Registry) is
+            # resolved by the build action.
+            chart_path=$(echo "$service_json" | jq -r '.definition.build.chartPath // ""')
+            if [ -n "$chart_path" ]; then
               echo "needs_build=true" >> $GITHUB_OUTPUT
             else
-              echo "::error::helm-chart.v1 service is missing required chartRepository configuration"
+              echo "::error::helm-chart.v1 service is missing required build.chartPath configuration"
               exit 1
             fi
           else
@@ -150,6 +152,7 @@ jobs:
           ryvn_auth_url: ${{ inputs.ryvn_auth_url }}
           ryvn_project_id: ${{ inputs.ryvn_project_id }}
           ryvn_org_id: ${{ inputs.ryvn_org_id }}
+          ryvn_cli_version: ${{ inputs.ryvn_cli_version }}
           build_secrets: ${{ secrets.BUILD_SECRETS }}
 
       - name: Create Ryvn Release
