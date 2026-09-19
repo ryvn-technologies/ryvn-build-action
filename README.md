@@ -49,7 +49,7 @@ jobs:
 
 Set `ryvn_org_id` when more than one Ryvn organization trusts the same GitHub repository. Static credentials keep working unchanged for CI systems without OIDC and during the rollout.
 
-Keyless auth needs a Ryvn CLI with the OIDC credential source; there is no separate login step — every `ryvn` invocation exchanges the job's OIDC token on its own (cached within the process). Both the action and the reusable workflow (`.github/workflows/release.yml`) install the CLI and accept a `ryvn_cli_version` input (e.g. `v1.254.0`) to pin a release; when unset the action installs `v1.254.0`, the oldest release carrying the publishing commands (`create/delete registry-config`, `package chart`, `push chart`, `describe image`), the managed Helm destination fix, and the image digest in `describe image -o artifact`. An older explicit pin fails at the first missing command with the CLI's own `unknown command` error. A CLI that predates keyless auth ignores `id-token: write` and uses the static credentials if set; otherwise its first `ryvn` call fails on missing credentials.
+Keyless auth needs a Ryvn CLI with the OIDC credential source; there is no separate login step — every `ryvn` invocation exchanges the job's GitHub OIDC token on its own (cached within the process). Both the action and the reusable workflow (`.github/workflows/release.yml`) install the CLI and accept a `ryvn_cli_version` input (e.g. `v1.278.0`) to pin a release; when unset the action installs `v1.278.0`, the oldest release carrying the publishing commands (`create/delete registry-config`, `package chart`, `push chart`, `create release-file`, `describe image`), the managed Helm destination fix, and the image digest in `describe image -o artifact`. An older explicit pin fails at the first missing command with the CLI's own `unknown command` error. A CLI that predates keyless auth ignores `id-token: write` and uses the static credentials if set; otherwise its first `ryvn` call fails on missing credentials.
 
 The reusable workflow inherits the `GITHUB_TOKEN` permissions granted by the calling job, so the caller decides the auth mode: `contents: write` plus `id-token: write` for keyless auth, or `contents: write` alone to force the static `RYVN_CLIENT_ID`/`RYVN_CLIENT_SECRET` credentials (e.g. for services whose spec has no GitHub `repo` locator, such as public terraform module `source`s).
 
@@ -65,7 +65,7 @@ The reusable workflow also accepts an optional `tag_prefix` input (e.g. `gcp-gke
 | `ryvn_client_id`     | Ryvn Client ID (static credentials; see Authentication)   | No       |         |
 | `ryvn_client_secret` | Ryvn Client Secret (static credentials; see Authentication)| No       |         |
 | `ryvn_org_id`        | Ryvn organization ID, for repositories trusted by more than one organization | No |   |
-| `ryvn_cli_version`   | Ryvn CLI release to install (must be `v1.254.0` or newer) | No | `v1.254.0` |
+| `ryvn_cli_version`   | Ryvn CLI release to install (must be `v1.278.0` or newer) | No | `v1.278.0` |
 | `build_args`         | Build arguments to pass to the Docker build               | No       |         |
 | `use_nixpacks`       | Use Nixpacks to build Docker images instead of Dockerfile | No       | `false` |
 | `nixpacks_pkgs`      | Additional Nix packages to install in the environment     | No       | `""`    |
@@ -77,8 +77,9 @@ The reusable workflow also accepts an optional `tag_prefix` input (e.g. `gcp-gke
 | Name              | Description                                                                 |
 | ----------------- | --------------------------------------------------------------------------- |
 | `build_artifacts` | JSON array of the artifacts this run published, in the shape `ryvn create release --artifacts-file` accepts |
+| `release_file` | Generated release artifact inventory for Helm services; empty for container services and build-only runs. Pass it to `ryvn create release -f` |
 
-For a container service the array holds one entry with the published image and its digest: the digest the build step reported for the push when available, otherwise the one the registry resolves for the tag (the image index digest for a multi-platform build). A pushed image that does not resolve fails the action, because the release would otherwise have no immutable identity (`ryvn describe image`; carrying the digest into the artifact requires a CLI release that includes it — see the minimum version below). Deployments still pull by tag; the digest is recorded, not enforced at deploy time.
+For a container service the array holds one entry with the published image and its digest: the digest the build step reported for the push when available, otherwise the one the registry resolves for the tag (the image index digest for a multi-platform build). A pushed image that does not resolve fails the action, because the release would otherwise have no immutable identity (`ryvn describe image`; carrying the digest into the artifact requires a CLI release that includes it — see the minimum version below). The reusable workflow creates container releases with `--artifacts-file <build_artifacts> --inventory`, producing an immutable release with the digest-pinned image as its primary artifact. Deployments still pull by tag; the digest is recorded, not enforced at deploy time.
 
 ```json
 [{"name": "api", "image": {"repository": "…/acme/api", "tag": "1.2.3", "digest": "sha256:…", "exposedPorts": ["8080/tcp"], "exposedPortsSource": "image"}}]
@@ -172,20 +173,22 @@ jobs:
           ryvn_client_secret: ${{ secrets.RYVN_CLIENT_SECRET }}
 ```
 
+An existing `<service>-release.ryvn.yaml` beside the build can contribute dependencies, migrations, and labels to the generated inventory. It must not define `artifacts`: the build generates them, and the command fails if it does.
+
 ## How It Works
 
 The action is orchestration only: runner setup, Buildx, `docker/build-push-action`, and step outputs. Everything that needs to know about Ryvn registries, Helm charts, or release artifacts is a Ryvn CLI command, so the same flow works from any CI system.
 
-1. Installs the Ryvn CLI (`ryvn_cli_version`, default `v1.254.0`). Creates a private per-invocation workspace under `runner.temp` for every transient file (service and registry metadata, registry config, chart package, artifacts), so several invocations in one job never share state and nothing is written into the checkout; the `always()` cleanup step removes it.
+1. Installs the Ryvn CLI (`ryvn_cli_version`, default `v1.278.0`). Creates a private per-invocation workspace under `runner.temp` for every transient file (service and registry metadata, registry config, chart package, artifacts), so several invocations in one job never share state and nothing is written into the checkout; the `always()` cleanup step removes it.
 2. `ryvn get service <name> -o json` for the service definition; ordinary fields (`type`, `build.*`, `image`) become step outputs and build inputs. The `ryvn_api_url`/`ryvn_auth_url`/`ryvn_org_id`/`ryvn_project_id` inputs apply to the action's own CLI steps only (falling back to the job's `RYVN_*` environment); they are not exported to later steps.
 3. Detects the build method:
    - If `buildpack: "nixpack"` is set in service definition, uses Nixpacks with the service's build command
    - If `use_nixpacks: true` is provided as input, uses Nixpacks
    - Otherwise uses standard Docker build with Dockerfile
 4. Unless `build_only`, reads the bound registry (`ryvn get registry <definition.registry> -o json`) and routes on its `definition.type` — see Registries below.
-5. Container services: `docker/build-push-action` builds (and pushes) the image; unless `build_only`, `ryvn describe image <ref> --service <name> -o artifact` resolves the pushed tag in the registry and records its digest and exposed ports. When the build step reported a push digest (Buildx does, Nixpacks does not) it is passed as `--digest`, and the CLI inspects that exact content (`repo@digest`) so the artifact describes what this run pushed even if the tag has since been moved by another push; the current tag is not compared against it. Without a push digest the tag is resolved as it is at that moment. The image must resolve; only exposed-port metadata is best effort.
-6. Helm services: `ryvn package chart <chartPath> --version <v> -o json` packages locally; `ryvn push chart <pkg> --service <name> -o artifact` resolves the service's chart destination and publishes.
-7. A service produces at most one artifact array (`describe image` or `push chart`; `[]` for a `build_only` run), passed through as the `build_artifacts` output, which is exactly what `ryvn create release --artifacts-file` consumes.
+5. Container services: `docker/build-push-action` builds (and pushes) the image; unless `build_only`, `ryvn describe image <ref> --service <name> -o artifact` resolves the pushed tag in the registry and records its digest and exposed ports. When the build step reported a push digest (Buildx does, Nixpacks does not) it is passed as `--digest`, and the CLI inspects that exact content (`repo@digest`) so the artifact describes what this run pushed even if the tag has since been moved by another push; the current tag is not compared against it. Without a push digest the tag is resolved as it is at that moment. The image must resolve; only exposed-port metadata is best effort. The reusable workflow passes `--artifacts-file <build_artifacts> --inventory` when creating the release, so the digest-pinned image is the release's primary artifact.
+6. Helm services: `ryvn package chart <chartPath> --version <v> -o json` packages locally; `ryvn push chart <pkg> --service <name> -o artifact` resolves the service's chart destination and publishes; `ryvn create release-file` renders the packaged chart, discovers every image reference, resolves all image digests, and writes the release artifact inventory.
+7. A service produces at most one artifact array (`describe image` or `push chart`; `[]` for a `build_only` run), passed through as the `build_artifacts` output. Helm services additionally produce the `release_file` output for `ryvn create release -f`.
 
 Buildable service types are `web-server.v1`, `job.v1` and `helm-chart.v1`.
 
@@ -196,13 +199,18 @@ Helm charts are packaged from `definition.build.chartPath`. That field has alway
 ```bash
 ryvn create registry-config "$RUNNER_TEMP/ryvn-auth" --service api -o env > auth.env && . ./auth.env   # GAR; ECR keeps aws ecr get-login-password
 docker buildx build --push -t "$IMAGE:$VERSION" .
+# container services
 ryvn describe image "$IMAGE:$VERSION" --service api -o artifact > image.json
-ryvn package chart ./chart --version "$VERSION" -o json                        # helm-chart.v1 only
+ryvn create release api "$VERSION" --channel "$CHANNEL" --artifacts-file image.json --inventory
+# helm-chart.v1 services
+ryvn package chart ./chart --version "$VERSION" -o json
 ryvn push chart "api-$VERSION.tgz" --service api -o artifact > chart.json
-jq -s 'add' image.json chart.json > artifacts.json                             # both are arrays
-ryvn create release --service api --version "$VERSION" --artifacts-file artifacts.json
+ryvn create release-file api "$VERSION" --chart "api-$VERSION.tgz" --artifacts-file chart.json --output-file release.yaml
+ryvn create release api "$VERSION" --channel "$CHANNEL" -f release.yaml
 ryvn delete registry-config "$RUNNER_TEMP/ryvn-auth"
 ```
+
+When `release_file` is used, a repo-local `<service>-release.ryvn.yaml` is not auto-loaded; the `-f` file replaces it.
 
 ## Registries
 

@@ -25,7 +25,7 @@ inputs:
     required: false
     default: ""
   ryvn_cli_version:
-    description: "Ryvn CLI release to install; must be v1.254.0 or newer (the registry-config, chart and image commands, artifact digests). Defaults to v1.254.0 (optional)"
+    description: "Ryvn CLI release to install; must be v1.278.0 or newer (the registry-config, chart and image commands, artifact digests). Defaults to v1.278.0 (optional)"
     required: false
     default: ""
   ryvn_api_url:
@@ -81,6 +81,9 @@ outputs:
   build_artifacts:
     description: "JSON array of artifacts built by this action"
     value: ${{ steps.artifacts.outputs.build_artifacts }}
+  release_file:
+    description: "Generated release artifact inventory for helm-chart services; empty for container services and build-only runs. Pass it to `ryvn create release -f`."
+    value: ${{ steps.artifacts.outputs.release_file }}
 
 runs:
   using: "composite"
@@ -91,7 +94,7 @@ runs:
     - name: Install Ryvn CLI
       uses: ryvn-technologies/install-ryvn-cli@v1.0.0
       env:
-        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.254.0' }}
+        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.278.0' }}
 
     # One private directory per invocation for every transient file (service
     # and registry metadata, registry config, chart package, artifacts) so
@@ -434,6 +437,29 @@ runs:
         fi
         ryvn "${args[@]}" > "$WORKSPACE/artifacts.json"
 
+    - name: Generate release inventory
+      if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
+      shell: bash
+      env:
+        RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
+        RYVN_CLIENT_SECRET: ${{ inputs.ryvn_client_secret }}
+        RYVN_API_URL: ${{ inputs.ryvn_api_url || env.RYVN_API_URL }}
+        RYVN_AUTH_URL: ${{ inputs.ryvn_auth_url || env.RYVN_AUTH_URL }}
+        RYVN_ORG_ID: ${{ inputs.ryvn_org_id || env.RYVN_ORG_ID }}
+        RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id || env.RYVN_PROJECT_ID }}
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
+        SERVICE_NAME: ${{ inputs.service_name }}
+        VERSION: ${{ inputs.version }}
+        CHART_PACKAGE: ${{ steps.helm_package.outputs.chart_package }}
+        REGISTRY_PROVIDER: ${{ steps.service.outputs.registry_provider }}
+      run: |
+        set -euo pipefail
+        args=(create release-file "$SERVICE_NAME" "$VERSION" --chart "$CHART_PACKAGE" --artifacts-file "$WORKSPACE/artifacts.json" --output-file "$WORKSPACE/release.yaml")
+        if [[ "$REGISTRY_PROVIDER" == "ecr" ]]; then
+          args+=(--registry-config "${DOCKER_CONFIG:-$HOME/.docker}/config.json")
+        fi
+        ryvn "${args[@]}"
+
     # The pushed image must resolve in the registry. When the build step
     # reports a push digest (Nixpacks does not) that exact content is
     # inspected, even if the tag has since moved; the tag itself is not
@@ -472,6 +498,15 @@ runs:
           echo "build_artifacts<<RYVN_ARTIFACTS_EOF"
           echo "$artifacts"
           echo "RYVN_ARTIFACTS_EOF"
+        } >> "$GITHUB_OUTPUT"
+        release_file=""
+        if [[ -s "$WORKSPACE/release.yaml" ]]; then
+          release_file="$(cat "$WORKSPACE/release.yaml")"
+        fi
+        {
+          echo "release_file<<RYVN_RELEASE_FILE_EOF"
+          echo "$release_file"
+          echo "RYVN_RELEASE_FILE_EOF"
         } >> "$GITHUB_OUTPUT"
 
     # The workspace is this invocation's own mktemp directory: the registry

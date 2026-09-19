@@ -34,7 +34,7 @@ on:
         type: string
         default: ""
       ryvn_cli_version:
-        description: "Ryvn CLI release to install (e.g. v1.254.0). Defaults to v1.254.0, the oldest release with the publishing commands and artifact digests; keyless auth needs a CLI with the OIDC credential source"
+        description: "Ryvn CLI release to install (e.g. v1.278.0). Defaults to v1.278.0, the oldest release with the publishing commands and artifact digests; keyless auth needs a CLI with the OIDC credential source"
         required: false
         type: string
         default: ""
@@ -78,7 +78,7 @@ jobs:
       - name: Install Ryvn CLI
         uses: ryvn-technologies/install-ryvn-cli@v1.0.0
         env:
-          RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.254.0' }}
+          RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.278.0' }}
 
       - name: Get Service Info
         id: service-info
@@ -162,20 +162,21 @@ jobs:
           !contains(github.event.pull_request.title, '[skip-release]')
         env:
           BUILD_ARTIFACTS: ${{ steps.build.outputs.build_artifacts }}
+          RELEASE_FILE: ${{ steps.build.outputs.release_file }}
         run: |
           version="${{ steps.generate-tag.outputs.new_tag }}"
           version=${version#${{ steps.service-info.outputs.tag_prefix }}}
           version=${version#@}
           channel="${{ steps.generate-tag.outputs.channel }}"
           artifact_args=()
-          if [ -n "$BUILD_ARTIFACTS" ] && [ "$BUILD_ARTIFACTS" != "[]" ]; then
+          if [ -n "$RELEASE_FILE" ]; then
+            release_file="${RUNNER_TEMP}/ryvn-release.yaml"
+            printf '%s\n' "$RELEASE_FILE" > "$release_file"
+            artifact_args+=(-f "$release_file")
+          elif [ -n "$BUILD_ARTIFACTS" ] && [ "$BUILD_ARTIFACTS" != "[]" ]; then
             artifacts_file="${RUNNER_TEMP}/ryvn-build-artifacts.json"
             printf '%s\n' "$BUILD_ARTIFACTS" > "$artifacts_file"
-            if ryvn create release --help 2>&1 | grep -q -- '--artifacts-file'; then
-              artifact_args+=(--artifacts-file "$artifacts_file")
-            else
-              echo "::warning::installed Ryvn CLI does not support --artifacts-file; creating release without build artifact metadata"
-            fi
+            artifact_args+=(--artifacts-file "$artifacts_file" --inventory)
           fi
 
           ryvn create release ${{ inputs.service_name }} $version --channel "$channel" "${artifact_args[@]}"
