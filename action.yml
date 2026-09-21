@@ -1,5 +1,5 @@
-name: "Build and Push to Ryvn Registry"
-description: "Builds and pushes Docker images or Helm charts to Ryvn Registry"
+name: "Build and Push to Registry"
+description: "Builds and pushes Docker images or Helm charts to the service's registry"
 
 inputs:
   service_name:
@@ -25,7 +25,7 @@ inputs:
     required: false
     default: ""
   ryvn_cli_version:
-    description: "Ryvn CLI release to install; must be v1.278.0 or newer (the registry-config, chart and image commands, artifact digests). Defaults to v1.278.0 (optional)"
+    description: "Ryvn CLI release to install; must be v1.294.0 or newer (all-provider registry-config, repository preflight, chart and image commands, artifact digests). Defaults to v1.294.0 (optional)"
     required: false
     default: ""
   ryvn_api_url:
@@ -94,7 +94,7 @@ runs:
     - name: Install Ryvn CLI
       uses: ryvn-technologies/install-ryvn-cli@v1.0.0
       env:
-        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.278.0' }}
+        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.294.0' }}
 
     # One private directory per invocation for every transient file (service
     # and registry metadata, registry config, chart package, artifacts) so
@@ -158,26 +158,33 @@ runs:
           fi
         fi
 
-        # The registry the service is bound to decides how the runner logs in
-        # (Ryvn-managed ECR: AWS role; Google Artifact Registry: ryvn create
-        # registry-config). Destinations are resolved by the CLI at push time.
-        # build_only needs no registry. Reading it needs registry.read.
+        # The registry the service is bound to decides how the runner logs in.
+        # Only the managed "ryvn-registry" when it is ECR keeps the AWS role +
+        # amazon-ecr-login path; every other registry — managed GAR, customer
+        # ECR, generic OCI — logs in through a brokered registry config.
+        # Destinations are resolved by the CLI at push time. build_only needs
+        # no registry. Customer bindings are never read here — only the
+        # managed registry's type is fetched, which needs registry.read.
         registry_provider=""
         if [ "$BUILD_ONLY" != "true" ] && { [ "$container_build" = "true" ] || [ "$service_type" = "helm-chart.v1" ]; }; then
           registry_name=$(jq -r '.definition.registry // "ryvn-registry"' "$service_json")
-          if ! ryvn get registry "$registry_name" -o json > "$WORKSPACE/registry.json"; then
-            echo "::error::cannot read registry '$registry_name' bound to service $SERVICE_NAME (needs registry.read)"
-            exit 1
-          fi
-          registry_type=$(jq -r '.definition.type // ""' "$WORKSPACE/registry.json")
-          case "$registry_type" in
-            elasticContainerRegistry) registry_provider=ecr ;;
-            googleArtifactRegistry) registry_provider=gar ;;
-            *)
-              echo "::error::registry '$registry_name' (type '$registry_type') is not a Ryvn-managed ECR or Google Artifact Registry; ryvn-build-action cannot publish to it"
+          if [ "$registry_name" = "ryvn-registry" ]; then
+            # Only the managed registry needs its type resolved: ECR versus
+            # GAR decides whether the AWS role + amazon-ecr-login path runs.
+            # Requires registry.read on the managed registry.
+            if ! ryvn get registry "$registry_name" -o json > "$WORKSPACE/registry.json"; then
+              echo "::error::cannot read managed registry 'ryvn-registry' bound to service $SERVICE_NAME (needs registry.read)"
               exit 1
-              ;;
-          esac
+            fi
+            registry_type=$(jq -r '.definition.type // ""' "$WORKSPACE/registry.json")
+            if [ "$registry_type" = "elasticContainerRegistry" ]; then
+              registry_provider=ecr
+            else
+              registry_provider=brokered
+            fi
+          else
+            registry_provider=brokered
+          fi
         fi
 
         # Extract and validate working directory
@@ -304,15 +311,16 @@ runs:
         endpoint: ${{ inputs.buildx_endpoint }}
         driver: ${{ inputs.buildx_driver }}
 
-    # Google Artifact Registry: ryvn create registry-config mints a one-hour
+    # Brokered login: ryvn create registry-config mints a short-lived
     # credential right before the build and writes a disposable Docker/Helm
     # config in the workspace (seeded from the caller's config, credential
-    # helpers and other registries untouched). Its env is exported for the
+    # helpers and other registries untouched). Managed GAR, customer ECR and
+    # generic OCI registries all take this path. Its env is exported for the
     # build, push, inspection and chart steps; the cleanup step restores the
     # previous values and removes the workspace. Builds that outlive the credential fail at
     # push time; see README.
-    - name: Login to Google Artifact Registry
-      if: inputs.build_only != 'true' && steps.service.outputs.registry_provider == 'gar'
+    - name: Log in to registry
+      if: inputs.build_only != 'true' && steps.service.outputs.registry_provider == 'brokered'
       shell: bash
       env:
         RYVN_CLIENT_ID: ${{ inputs.ryvn_client_id }}
@@ -334,7 +342,7 @@ runs:
           echo "RYVN_ORIGINAL_DOCKER_CERT_PATH=${DOCKER_CERT_PATH-}"
           jq -r '.env | to_entries[] | "\(.key)=\(.value)"' "$WORKSPACE/registry-config.json"
         } >> "$GITHUB_ENV"
-        jq -r '"Logged in to \(.server) as \(.username) until \(.expiresAt)"' "$WORKSPACE/registry-config.json"
+        jq -r '"Logged in to \(.server) as \(.username) until \(.expiresAt // "never")"' "$WORKSPACE/registry-config.json"
 
     # Nixpacks Build and Push (with build command)
     - name: Build and push with Nixpacks (with build command)
