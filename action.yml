@@ -40,6 +40,10 @@ inputs:
   build_args:
     description: "Build arguments to pass to the Docker build"
     required: false
+  images:
+    description: "JSON map of named Dockerfile image targets built next to a Helm chart into the service's managed GAR repository"
+    required: false
+    default: "{}"
   platforms:
     description: "List of target platforms for build"
     required: false
@@ -268,6 +272,179 @@ runs:
         echo "build_command=$build_command" >> $GITHUB_OUTPUT
         echo "use_nixpacks_from_service=$use_nixpacks_from_service" >> $GITHUB_OUTPUT
 
+    - name: Resolve image targets
+      id: images
+      shell: bash
+      env:
+        IMAGES: ${{ inputs.images }}
+        SERVICE_NAME: ${{ inputs.service_name }}
+        VERSION: ${{ inputs.version }}
+        BUILD_ONLY: ${{ inputs.build_only }}
+        RYVN_CLI_VERSION_PIN: ${{ inputs.ryvn_cli_version }}
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
+        SERVICE_TYPE: ${{ steps.service.outputs.service_type }}
+        CONTAINER_BUILD: ${{ steps.service.outputs.container_build }}
+        REGISTRY_PROVIDER: ${{ steps.service.outputs.registry_provider }}
+        CHECKOUT: ${{ github.workspace }}
+        BUILD_ARGS: ${{ inputs.build_args }}
+        PLATFORMS: ${{ inputs.platforms }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${IMAGES//[[:space:]]/}" || "${IMAGES//[[:space:]]/}" == "{}" ]]; then
+          echo "enabled=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        command -v python3 >/dev/null 2>&1 || {
+          echo "::error::python3 is required when named image targets are enabled"
+          exit 1
+        }
+        python3 - <<'PY'
+        import json
+        import os
+        import re
+        import sys
+
+        def fail(message):
+            print(f"::error::{message}", file=sys.stderr)
+            raise SystemExit(1)
+
+        class RejectDuplicate(dict):
+            pass
+
+        def pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    fail(f"duplicate key {key!r}")
+                result[key] = value
+            return result
+
+        try:
+            data = json.loads(os.environ["IMAGES"], object_pairs_hook=pairs)
+        except json.JSONDecodeError as exc:
+            fail(f"invalid images JSON: {exc}")
+        if not isinstance(data, dict):
+            fail("images must be a JSON object")
+        if os.environ.get("SERVICE_TYPE") != "helm-chart.v1":
+            fail("named images require a helm-chart.v1 service")
+        if os.environ.get("CONTAINER_BUILD") == "true":
+            fail("named images cannot be used with a container service")
+        if os.environ.get("BUILD_ONLY") != "true" and os.environ.get("REGISTRY_PROVIDER") != "brokered":
+            fail("named images require brokered registry authentication")
+        service_name = os.environ["SERVICE_NAME"]
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", service_name):
+            fail("invalid service name")
+        for name, target in data.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", name):
+                fail(f"invalid image target name {name!r}")
+            if name == service_name:
+                fail(f"image target name {name!r} must not equal the service name")
+            if not isinstance(target, dict) or set(target) != {"build"}:
+                fail(f"image target {name!r} must contain only build")
+            build = target["build"]
+            if not isinstance(build, dict):
+                fail(f"image target {name!r} build must be an object")
+            unknown = set(build) - {"workingDir", "dockerfilePath", "dockerBuildArgs"}
+            if unknown:
+                fail(f"image target {name!r} has unknown build field {sorted(unknown)[0]!r}")
+            for field in ("workingDir", "dockerfilePath"):
+                if not isinstance(build.get(field), str) or not build[field]:
+                    fail(f"image target {name!r} requires non-empty string {field}")
+            args = build.get("dockerBuildArgs", {})
+            if not isinstance(args, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in args.items()):
+                fail(f"image target {name!r} dockerBuildArgs must be a string map")
+
+        service_path = os.path.join(os.environ["WORKSPACE"], "service.json")
+        try:
+            with open(service_path, encoding="utf-8") as stream:
+                service = json.load(stream)
+        except (OSError, json.JSONDecodeError) as exc:
+            fail(f"cannot read service metadata: {exc}")
+        definition = service.get("definition", {})
+        if definition.get("registry", "ryvn-registry") != "ryvn-registry":
+            fail("named images require registry ryvn-registry")
+        if isinstance(definition.get("repoURL"), str) and definition["repoURL"]:
+            fail("named images require the managed ryvn-registry chart destination; remove repoURL")
+        match = re.fullmatch(r"([^/?#]+)/([^/?#]+)/charts", definition.get("chartRepository", ""))
+        if not match:
+            fail("service chartRepository must be the managed GAR <project>/<repository>/charts path")
+        project, repository = match.groups()
+        host = ""
+        if os.environ.get("BUILD_ONLY") != "true":
+            registry_path = os.path.join(os.environ["WORKSPACE"], "registry.json")
+            if not os.path.isfile(registry_path):
+                fail("registry.json is required for named image publishing")
+            try:
+                with open(registry_path, encoding="utf-8") as stream:
+                    registry = json.load(stream).get("definition", {})
+            except (OSError, json.JSONDecodeError) as exc:
+                fail(f"cannot read registry metadata: {exc}")
+            if registry.get("type") != "googleArtifactRegistry":
+                fail("named images require a googleArtifactRegistry registry")
+            if not re.fullmatch(r"[a-z0-9-]+-docker\.pkg\.dev", registry.get("url", "")):
+                fail("registry URL is not a valid GAR host")
+            if registry.get("projectId") != project:
+                fail("registry projectId does not match the service chartRepository")
+            host = registry["url"]
+
+        pin = os.environ.get("RYVN_CLI_VERSION_PIN", "")
+        if pin:
+            version = pin.lstrip("v").split(".")
+            if len(version) != 3 or any(not part.isdigit() for part in version):
+                fail("ryvn_cli_version must be MAJOR.MINOR.PATCH")
+            if tuple(map(int, version)) < (1, 294, 0):
+                fail("named images need ryvn CLI v1.294.0 or newer")
+        root = os.path.realpath(os.environ["CHECKOUT"])
+        action_args = {}
+        if os.environ.get("BUILD_ARGS", ""):
+            for line in os.environ["BUILD_ARGS"].splitlines():
+                if "=" not in line:
+                    fail("build_args must contain KEY=VALUE lines")
+                key, value = line.split("=", 1)
+                action_args[key] = value
+
+        def expand(value):
+            return re.sub(
+                r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+                lambda match: os.environ.get(match.group(1) or match.group(2), ""),
+                value,
+            )
+
+        targets = []
+        for name in sorted(data):
+            build = data[name]["build"]
+            context = os.path.realpath(os.path.join(root, build["workingDir"]))
+            dockerfile = os.path.realpath(os.path.join(root, build["dockerfilePath"]))
+            for label, path in (("workingDir", context), ("dockerfilePath", dockerfile)):
+                if not (path == root or path.startswith(root + os.sep)):
+                    fail(f"image target {name!r} {label} resolves outside the checkout")
+            if not os.path.isdir(context):
+                fail(f"image target {name!r} context does not exist")
+            if not os.path.isfile(dockerfile):
+                fail(f"image target {name!r} dockerfile does not exist")
+            args = action_args or {key: expand(value) for key, value in build.get("dockerBuildArgs", {}).items()}
+            targets.append({
+                "name": name,
+                "target": f"img-{name}",
+                "context": context,
+                "dockerfile": dockerfile,
+                "args": args,
+                "repository": f"{host}/{project}/{repository}/images/{name}" if host else "",
+            })
+        output = {
+            "tag": os.environ["VERSION"].replace("+", "_"),
+            "targets": targets,
+        }
+        os.makedirs(os.environ["WORKSPACE"], exist_ok=True)
+        with open(os.path.join(os.environ["WORKSPACE"], "images.json"), "w", encoding="utf-8") as stream:
+            json.dump(output, stream, separators=(",", ":"))
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
+            stream.write("enabled=true\n")
+            stream.write(f"count={len(targets)}\n")
+            stream.write(f"tag={output['tag']}\n")
+            stream.write(f"names={' '.join(target['name'] for target in targets)}\n")
+        PY
+
     - name: Configure AWS credentials
       if: inputs.build_only != 'true' && steps.service.outputs.registry_provider == 'ecr'
       uses: aws-actions/configure-aws-credentials@v4
@@ -298,18 +475,22 @@ runs:
     # switches to a disposable copy (which pins BUILDX_CONFIG back to the
     # caller's), so the setup action's post-job cleanup still finds it.
     - name: Set up Docker Buildx (Blacksmith)
-      if: steps.service.outputs.container_build == 'true' && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
+      if: (steps.service.outputs.container_build == 'true' && startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true') || (steps.images.outputs.enabled == 'true' && startsWith(runner.name, 'blacksmith'))
       uses: useblacksmith/setup-docker-builder@v2
       with:
         cache-key: ${{ inputs.service_name }}
 
     - name: Set up Docker Buildx (Docker)
-      if: steps.service.outputs.container_build == 'true' && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true'
+      if: (steps.service.outputs.container_build == 'true' && !startsWith(runner.name, 'blacksmith') && inputs.use_nixpacks != 'true' && steps.service.outputs.use_nixpacks_from_service != 'true') || (steps.images.outputs.enabled == 'true' && !startsWith(runner.name, 'blacksmith'))
       uses: docker/setup-buildx-action@v4
       with:
         version: latest
         endpoint: ${{ inputs.buildx_endpoint }}
         driver: ${{ inputs.buildx_driver }}
+
+    - name: Expose GitHub runtime for Bake cache
+      if: steps.images.outputs.enabled == 'true' && !startsWith(runner.name, 'blacksmith') && inputs.disable_cache != 'true'
+      uses: crazy-max/ghaction-github-runtime@v3
 
     # Brokered login: ryvn create registry-config mints a short-lived
     # credential right before the build and writes a disposable Docker/Helm
@@ -412,7 +593,7 @@ runs:
     # (selected explicitly so a stale HELM_REGISTRY_CONFIG cannot shadow it).
     - name: Package Helm Chart
       id: helm_package
-      if: steps.service.outputs.service_type == 'helm-chart.v1'
+      if: steps.service.outputs.service_type == 'helm-chart.v1' && steps.images.outputs.enabled != 'true'
       shell: bash
       env:
         CHART_PATH: ${{ steps.service.outputs.helm_chart_path }}
@@ -422,6 +603,200 @@ runs:
         set -euo pipefail
         ryvn package chart "$CHART_PATH" --version "$VERSION" --destination "$WORKSPACE/chart" -o json > "$WORKSPACE/chart-package.json"
         echo "chart_package=$(jq -r '.path' "$WORKSPACE/chart-package.json")" >> "$GITHUB_OUTPUT"
+
+    - name: Build images and package chart
+      id: images_build
+      if: steps.images.outputs.enabled == 'true'
+      shell: bash
+      env:
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
+        IMAGES_ENABLED: ${{ steps.images.outputs.enabled }}
+        BUILD_ONLY: ${{ inputs.build_only }}
+        PLATFORMS: ${{ inputs.platforms }}
+        DISABLE_CACHE: ${{ inputs.disable_cache }}
+        SERVICE_NAME: ${{ inputs.service_name }}
+        VERSION: ${{ inputs.version }}
+        CHART_PATH: ${{ steps.service.outputs.helm_chart_path }}
+        BUILD_SECRETS: ${{ inputs.build_secrets }}
+        USE_GHA_CACHE: ${{ !startsWith(runner.name, 'blacksmith') && inputs.disable_cache != 'true' }}
+      run: |
+        set -euo pipefail
+        command -v python3 >/dev/null 2>&1 || {
+          echo "::error::python3 is required when named image targets are enabled"
+          exit 1
+        }
+        python3 - <<'PY'
+        import json
+        import os
+        import stat
+
+        with open(os.path.join(os.environ["WORKSPACE"], "images.json"), encoding="utf-8") as stream:
+            images = json.load(stream)
+        targets = {}
+        for item in images["targets"]:
+            name = item["name"]
+            target = {
+                "context": item["context"],
+                "dockerfile": item["dockerfile"],
+                "args": item["args"],
+                "platforms": [platform.strip() for platform in os.environ["PLATFORMS"].split(",") if platform.strip()],
+                "output": ["type=cacheonly" if os.environ["BUILD_ONLY"] == "true" else "type=registry"],
+            }
+            if item["repository"]:
+                target["tags"] = [f'{item["repository"]}:{images["tag"]}']
+            if os.environ.get("USE_GHA_CACHE") == "true":
+                scope = f'{os.environ["SERVICE_NAME"]}-{name}'
+                target["cache-from"] = [f"type=gha,scope={scope}"]
+                target["cache-to"] = [f"type=gha,mode=max,scope={scope}"]
+            targets[item["target"]] = target
+        secret_index = 0
+        for line in os.environ.get("BUILD_SECRETS", "").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env_name = f"RYVN_BUILD_SECRET_{secret_index}"
+            os.environ[env_name] = value
+            for target in targets.values():
+                target.setdefault("secret", []).append(f"id={key},env={env_name}")
+            secret_index += 1
+        bake = {"group": {"default": {"targets": [item["target"] for item in images["targets"]]}}, "target": targets}
+        path = os.path.join(os.environ["WORKSPACE"], "bake.json")
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(bake, stream, separators=(",", ":"))
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        PY
+        secret_index=0
+        while IFS= read -r secret_line; do
+          [[ -z "$secret_line" || "$secret_line" != *=* ]] && continue
+          secret_key=${secret_line%%=*}
+          secret_value=${secret_line#*=}
+          export "RYVN_BUILD_SECRET_${secret_index}=$secret_value"
+          secret_index=$((secret_index + 1))
+        done <<< "$BUILD_SECRETS"
+
+        : > "$WORKSPACE/bake.log"
+        : > "$WORKSPACE/chart-package.log"
+        allow_args=()
+        while IFS= read -r context; do
+          allow_args+=(--allow "fs.read=$context")
+        done < <(jq -r '.targets[] | .context, (.dockerfile | sub("/[^/]*$"; ""))' "$WORKSPACE/images.json" | sort -u)
+        (
+          child_pid=""
+          trap 'kill "$child_pid" 2>/dev/null || true' INT TERM
+          echo "[$(date -u +%FT%T.%3NZ)] image bake started"
+          status=0
+          docker buildx bake "${allow_args[@]}" --file "$WORKSPACE/bake.json" --metadata-file "$WORKSPACE/bake-metadata.json" --progress plain &
+          child_pid=$!
+          wait "$child_pid" || status=$?
+          echo "[$(date -u +%FT%T.%3NZ)] image bake finished (exit $status)"
+          exit "$status"
+        ) > "$WORKSPACE/bake.log" 2>&1 &
+        bake_pid=$!
+        (
+          child_pid=""
+          trap 'kill "$child_pid" 2>/dev/null || true' INT TERM
+          echo "[$(date -u +%FT%T.%3NZ)] chart packaging started" >&2
+          status=0
+          ryvn package chart "$CHART_PATH" --version "$VERSION" --destination "$WORKSPACE/chart" -o json &
+          child_pid=$!
+          wait "$child_pid" || status=$?
+          echo "[$(date -u +%FT%T.%3NZ)] chart packaging finished (exit $status)" >&2
+          exit "$status"
+        ) > "$WORKSPACE/chart-package.json" 2> "$WORKSPACE/chart-package.log" &
+        chart_pid=$!
+        trap 'kill "$bake_pid" "$chart_pid" 2>/dev/null || true; wait "$bake_pid" 2>/dev/null || true; wait "$chart_pid" 2>/dev/null || true; exit 143' INT TERM
+        bake_status=0
+        chart_status=0
+        completed_pid=""
+        first_status=0
+        if wait -n -p completed_pid "$bake_pid" "$chart_pid"; then
+          first_status=0
+        else
+          first_status=$?
+        fi
+        if [[ "$first_status" -ne 0 ]]; then
+          if [[ "$completed_pid" == "$bake_pid" ]]; then
+            kill "$chart_pid" 2>/dev/null || true
+          else
+            kill "$bake_pid" 2>/dev/null || true
+          fi
+        fi
+        wait "$bake_pid" || bake_status=$?
+        wait "$chart_pid" || chart_status=$?
+        cat "$WORKSPACE/bake.log" "$WORKSPACE/chart-package.log"
+        if [[ "$chart_status" -ne 0 && "$chart_status" -ne 143 ]]; then
+          echo "::error::chart packaging failed"
+          exit 1
+        fi
+        if [[ "$bake_status" -ne 0 ]]; then
+          failed_targets="$(
+            python3 - "$WORKSPACE/bake.log" <<'PY'
+        import re
+        import sys
+
+        steps = {}
+        failed = set()
+        with open(sys.argv[1], encoding="utf-8") as stream:
+            for line in stream:
+                match = re.match(r"^#(\d+) \[img-([a-z0-9-]+)[ \]]", line)
+                if match:
+                    steps[match.group(1)] = match.group(2)
+                match = re.match(r"^#(\d+) ERROR", line)
+                if match and match.group(1) in steps:
+                    failed.add(steps[match.group(1)])
+                match = re.match(r"^ERROR: .*img-([a-z0-9-]+)", line)
+                if match:
+                    failed.add(match.group(1))
+        print(" ".join(sorted(failed)))
+        PY
+          )"
+          if [[ -z "$failed_targets" ]]; then
+            failed_targets="$(jq -r '.targets[].name' "$WORKSPACE/images.json" | paste -sd ' ' -)"
+          fi
+          echo "::error::image build failed (targets: $failed_targets)"
+          exit 1
+        fi
+        echo "chart_package=$(jq -r .path "$WORKSPACE/chart-package.json")" >> "$GITHUB_OUTPUT"
+        if [[ "$BUILD_ONLY" != "true" ]]; then
+          jq -n --slurpfile metadata "$WORKSPACE/bake-metadata.json" --slurpfile images "$WORKSPACE/images.json" '
+            reduce $images[0].targets[] as $target ({}; .[$target.name] = ($metadata[0]["img-"+$target.name]["containerimage.digest"] // ""))' > "$WORKSPACE/image-digests.json"
+          while IFS= read -r name; do
+            digest="$(jq -r --arg name "$name" '.[$name] // ""' "$WORKSPACE/image-digests.json")"
+            if [[ -z "$digest" || "$digest" == "null" || "$digest" != sha256:* ]]; then
+              echo "::error::missing or invalid digest for image target $name"
+              exit 1
+            fi
+          done < <(jq -r '.targets[].name' "$WORKSPACE/images.json")
+        fi
+
+    - name: Describe published images
+      id: images_describe
+      if: steps.images.outputs.enabled == 'true' && inputs.build_only != 'true'
+      shell: bash
+      env:
+        WORKSPACE: ${{ steps.workspace.outputs.dir }}
+        SERVICE_NAME: ${{ inputs.service_name }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$WORKSPACE/image-artifacts"
+        while IFS= read -r name; do
+          repository="$(jq -r --arg name "$name" '.targets[] | select(.name == $name) | .repository' "$WORKSPACE/images.json")"
+          tag="$(jq -r .tag "$WORKSPACE/images.json")"
+          digest="$(jq -r --arg name "$name" '.[$name]' "$WORKSPACE/image-digests.json")"
+          if ! ryvn describe image "${repository}:${tag}" --name "$name" --digest "$digest" -o artifact > "$WORKSPACE/image-artifacts/$name.json"; then
+            echo "::error::failed to describe published image target $name"
+            exit 1
+          fi
+        done < <(jq -r '.targets[].name' "$WORKSPACE/images.json")
+        jq -s 'add' "$WORKSPACE"/image-artifacts/*.json > "$WORKSPACE/image-artifacts.json"
+        count="$(jq -r '[.[].name] | unique | length' "$WORKSPACE/image-artifacts.json")"
+        total="$(jq -r 'length' "$WORKSPACE/image-artifacts.json")"
+        expected="$(jq -r '.targets | length' "$WORKSPACE/images.json")"
+        if [[ "$count" != "$expected" || "$total" != "$expected" ]]; then
+          echo "::error::published image artifact names are not unique"
+          exit 1
+        fi
 
     - name: Push Helm Chart to Registry
       if: steps.service.outputs.service_type == 'helm-chart.v1' && inputs.build_only != 'true'
@@ -434,7 +809,7 @@ runs:
         RYVN_ORG_ID: ${{ inputs.ryvn_org_id || env.RYVN_ORG_ID }}
         RYVN_PROJECT_ID: ${{ inputs.ryvn_project_id || env.RYVN_PROJECT_ID }}
         SERVICE_NAME: ${{ inputs.service_name }}
-        CHART_PACKAGE: ${{ steps.helm_package.outputs.chart_package }}
+        CHART_PACKAGE: ${{ steps.helm_package.outputs.chart_package || steps.images_build.outputs.chart_package }}
         REGISTRY_PROVIDER: ${{ steps.service.outputs.registry_provider }}
         WORKSPACE: ${{ steps.workspace.outputs.dir }}
       run: |
@@ -458,15 +833,94 @@ runs:
         WORKSPACE: ${{ steps.workspace.outputs.dir }}
         SERVICE_NAME: ${{ inputs.service_name }}
         VERSION: ${{ inputs.version }}
-        CHART_PACKAGE: ${{ steps.helm_package.outputs.chart_package }}
+        CHART_PACKAGE: ${{ steps.helm_package.outputs.chart_package || steps.images_build.outputs.chart_package }}
         REGISTRY_PROVIDER: ${{ steps.service.outputs.registry_provider }}
+        IMAGES_ENABLED: ${{ steps.images.outputs.enabled }}
       run: |
         set -euo pipefail
-        args=(create release-file "$SERVICE_NAME" "$VERSION" --chart "$CHART_PACKAGE" --artifacts-file "$WORKSPACE/artifacts.json" --output-file "$WORKSPACE/release.yaml")
+        artifacts_file="$WORKSPACE/artifacts.json"
+        if [[ "$IMAGES_ENABLED" == "true" ]]; then
+          jq -s 'add' "$WORKSPACE/artifacts.json" "$WORKSPACE/image-artifacts.json" > "$WORKSPACE/release-artifacts.json"
+          if [[ "$(jq '[.[].name] | unique | length' "$WORKSPACE/release-artifacts.json")" != "$(jq 'length' "$WORKSPACE/release-artifacts.json")" ]]; then
+            echo "::error::release artifact names are not unique"
+            exit 1
+          fi
+          artifacts_file="$WORKSPACE/release-artifacts.json"
+        fi
+        args=(create release-file "$SERVICE_NAME" "$VERSION" --chart "$CHART_PACKAGE" --artifacts-file "$artifacts_file" --output-file "$WORKSPACE/release.yaml")
         if [[ "$REGISTRY_PROVIDER" == "ecr" ]]; then
           args+=(--registry-config "${DOCKER_CONFIG:-$HOME/.docker}/config.json")
         fi
         ryvn "${args[@]}"
+        if [[ "$IMAGES_ENABLED" == "true" ]]; then
+          # release-file emits block YAML via sigs.k8s.io/yaml; PyYAML parses the
+          # inventory and compares each published artifact (chart + images)
+          # field-by-field against it.
+          python3 -c 'import yaml' 2>/dev/null || PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install --quiet --user 'PyYAML==6.0.2' || {
+            echo "::error::PyYAML is required to verify the release inventory when named image targets are enabled"
+            exit 1
+          }
+        python3 - <<'PY'
+        import json
+        import os
+        import sys
+
+        import yaml
+
+
+        def fail(message):
+            print(f"::error::{message}", file=sys.stderr)
+            raise SystemExit(1)
+
+
+        workspace = os.environ["WORKSPACE"]
+        service_name = os.environ["SERVICE_NAME"]
+        version = os.environ["VERSION"]
+        with open(os.path.join(workspace, "release.yaml"), encoding="utf-8") as stream:
+            release = yaml.safe_load(stream)
+        with open(os.path.join(workspace, "release-artifacts.json"), encoding="utf-8") as stream:
+            expected = json.load(stream)
+
+        if not isinstance(release, dict):
+            fail("release inventory is not a mapping")
+        if release.get("primaryArtifact") != service_name:
+            fail(f"release inventory primary artifact is {release.get('primaryArtifact')!r}, expected {service_name!r}")
+        if release.get("version") != version:
+            fail(f"release inventory version is {release.get('version')!r}, expected {version!r}")
+        artifacts = release.get("artifacts")
+        if not isinstance(artifacts, list) or not all(isinstance(a, dict) for a in artifacts):
+            fail("release inventory artifacts is not a list of mappings")
+        by_name = {}
+        for artifact in artifacts:
+            name = artifact.get("name")
+            if name in by_name:
+                fail(f"release inventory artifact name {name!r} is not unique")
+            by_name[name] = artifact
+
+        charts = [a for a in expected if a.get("helmChart")]
+        if len(charts) != 1 or charts[0].get("name") != service_name:
+            fail(f"expected exactly one chart artifact named {service_name!r} in the published artifacts")
+
+        for want in expected:
+            got = by_name.get(want["name"])
+            if got is None:
+                fail(f"release inventory is missing artifact {want['name']!r}")
+            if want.get("helmChart"):
+                section, fields = "helmChart", ("repoUrl", "chartName", "version", "digest")
+            else:
+                section, fields = "image", ("repository", "tag", "digest")
+            actual = got.get(section)
+            if not isinstance(actual, dict):
+                fail(f"release inventory artifact {want['name']!r} has no {section} entry")
+            for field in fields:
+                if actual.get(field) != want[section].get(field):
+                    fail(
+                        f"release inventory artifact {want['name']!r} {section}.{field} is "
+                        f"{actual.get(field)!r}, expected {want[section].get(field)!r}"
+                    )
+        print(f"release inventory retains {len(expected)} published artifacts (primary: {service_name})")
+        PY
+        fi
 
     # The pushed image must resolve in the registry. When the build step
     # reports a push digest (Nixpacks does not) that exact content is
@@ -495,11 +949,16 @@ runs:
       shell: bash
       env:
         WORKSPACE: ${{ steps.workspace.outputs.dir }}
+        IMAGES_ENABLED: ${{ steps.images.outputs.enabled }}
       run: |
         set -euo pipefail
         artifacts="[]"
-        if [[ -s "$WORKSPACE/artifacts.json" ]]; then
-          artifacts="$(jq -c . "$WORKSPACE/artifacts.json")"
+        artifacts_file="$WORKSPACE/artifacts.json"
+        if [[ "${IMAGES_ENABLED-}" == "true" && -s "$WORKSPACE/release-artifacts.json" ]]; then
+          artifacts_file="$WORKSPACE/release-artifacts.json"
+        fi
+        if [[ -s "$artifacts_file" ]]; then
+          artifacts="$(jq -c . "$artifacts_file")"
         fi
         echo "Build artifacts: $artifacts"
         {

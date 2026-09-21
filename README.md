@@ -67,6 +67,7 @@ The reusable workflow also accepts an optional `tag_prefix` input (e.g. `gcp-gke
 | `ryvn_org_id`        | Ryvn organization ID, for repositories trusted by more than one organization | No |   |
 | `ryvn_cli_version`   | Ryvn CLI release to install (must be `v1.294.0` or newer) | No | `v1.294.0` |
 | `build_args`         | Build arguments to pass to the Docker build               | No       |         |
+| `images`             | JSON map of named Dockerfile image targets built alongside a managed-GAR Helm chart | No | `{}` |
 | `use_nixpacks`       | Use Nixpacks to build Docker images instead of Dockerfile | No       | `false` |
 | `nixpacks_pkgs`      | Additional Nix packages to install in the environment     | No       | `""`    |
 | `nixpacks_apt`       | Additional Apt packages to install in the environment     | No       | `""`    |
@@ -174,6 +175,81 @@ jobs:
 ```
 
 An existing `<service>-release.ryvn.yaml` beside the build can contribute dependencies, migrations, and labels to the generated inventory. It must not define `artifacts`: the build generates them, and the command fails if it does.
+
+### Building images alongside a Helm chart (managed GAR)
+
+Pass `images` as a JSON object when a source-built `helm-chart.v1` service is
+bound to the managed `ryvn-registry` on Google Artifact Registry:
+
+```yaml
+images: >-
+  {"api":{"build":{"workingDir":".","dockerfilePath":"docker/api.Dockerfile","dockerBuildArgs":{"MODE":"production"}}},
+   "worker":{"build":{"workingDir":"worker","dockerfilePath":"docker/worker.Dockerfile"}}}
+```
+
+Each target name must start with a lowercase letter, contain only lowercase
+letters, digits, and hyphens, be at most 63 characters, and differ from the
+service name. `workingDir` and `dockerfilePath` are required checkout-relative
+paths that must resolve inside the checkout; symlinks escaping the checkout are
+rejected. The image destination is
+`<registry-host>/<project>/<repository>/images/<name>`, beside the chart's
+`/charts` repository. The project and repository come from the service's
+managed `chartRepository` (`<project>/<repository>/charts`), and the host
+comes from the managed `ryvn-registry`; `definition.repoURL` must not be set.
+Images and the chart share one version, and `+` in the version becomes `_` in
+the OCI tag.
+
+This mode requires a Helm service, a managed GAR `ryvn-registry`, Ryvn CLI
+v1.294.0 or newer, and `python3` on the runner; PyYAML is used to verify the
+release inventory and is installed with pip if absent. On non-Blacksmith runners,
+each image uses the GitHub Actions cache with scope `<service>-<name>` after
+`crazy-max/ghaction-github-runtime`; `docker buildx bake` is invoked with
+`--allow fs.read=<context|dockerfile dir>` for each target, so the runner needs
+Buildx entitlement support (the setup-buildx step installs the latest Buildx).
+On Blacksmith, the builder created by `useblacksmith/setup-docker-builder` is
+used and cache remains builder-local. `disable_cache` disables the GitHub
+Actions cache.
+
+With `build_only: true`, image and chart blobs are not pushed, registry
+credentials are not requested, and no release inventory is generated.
+`build_artifacts` is `[]` and `release_file` is empty. Any image or chart
+failure blocks chart publication, inventory generation, and release creation;
+inventory failures also block release creation. Already-pushed blobs may
+remain after a later failure.
+
+Reusable-workflow callers can keep the same API inputs and secrets:
+
+```yaml
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    uses: ryvn-technologies/ryvn-build-action/.github/workflows/release.yml@v2
+    with:
+      service_name: api
+      ryvn_api_url: ${{ vars.RYVN_API_URL }}
+      ryvn_auth_url: ${{ vars.RYVN_AUTH_URL }}
+      ryvn_org_id: ${{ vars.RYVN_ORG_ID }}
+      ryvn_project_id: ${{ vars.RYVN_PROJECT_ID }}
+      images: '{"worker":{"build":{"workingDir":"worker","dockerfilePath":"docker/worker.Dockerfile"}}}'
+    secrets:
+      RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
+      RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
+```
+
+To test unpublished changes, apply the `prerelease:ryvn-build-action` label;
+the sync workflow publishes a `prerelease/pr-<n>` branch in
+`ryvn-technologies/ryvn-build-action`. Callers testing a prerelease must pin
+both refs: use
+`ryvn-technologies/ryvn-build-action/.github/workflows/release.yml@prerelease/pr-<n>`
+for the reusable workflow and, because that workflow calls
+`ryvn-technologies/ryvn-build-action@v2`, update the nested action ref inside
+the prerelease branch's `release.yml` to the same prerelease ref (or call the
+composite action directly at `@prerelease/pr-<n>`). Changing only the caller
+ref does not exercise the new action. Do not assume `@v2` already contains the
+new input.
 
 ## How It Works
 
