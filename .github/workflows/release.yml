@@ -34,10 +34,15 @@ on:
         type: string
         default: ""
       ryvn_cli_version:
-        description: "Ryvn CLI release to install (e.g. v1.278.0). Defaults to v1.278.0, the oldest release with the publishing commands and artifact digests; keyless auth needs a CLI with the OIDC credential source"
+        description: "Ryvn CLI release to install (e.g. v1.294.0). Defaults to v1.294.0, the oldest release with the publishing commands and artifact digests for every registry provider; keyless auth needs a CLI with the OIDC credential source"
         required: false
         type: string
         default: ""
+      images:
+        description: "JSON map of named Dockerfile image targets built next to a Helm chart. Enabled mode uses --no-path-filter, so version inference considers repository-wide commits; include image contexts and Dockerfiles in your trigger paths."
+        required: false
+        type: string
+        default: "{}"
       tag_prefix:
         description: "Git tag prefix override (e.g. gcp-gke@). When set, used as-is instead of deriving the prefix from the service definition; needed for terraform services that use a public module `source` in a multi-service repository"
         required: false
@@ -78,14 +83,45 @@ jobs:
       - name: Install Ryvn CLI
         uses: ryvn-technologies/install-ryvn-cli@v1.0.0
         env:
-          RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.278.0' }}
+          RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.294.0' }}
 
       - name: Get Service Info
         id: service-info
         env:
           TAG_PREFIX_INPUT: ${{ inputs.tag_prefix }}
+          IMAGES: ${{ inputs.images }}
         run: |
-          service_json=$(ryvn get service ${{ inputs.service_name }} -o json)
+          if [ -z "${IMAGES//[[:space:]]/}" ] || [ "${IMAGES//[[:space:]]/}" = "{}" ]; then
+            echo "images_enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            command -v python3 >/dev/null 2>&1 || {
+              echo "::error::python3 is required when named image targets are enabled"
+              exit 1
+            }
+            python3 - <<'PY'
+          import json
+          import os
+          import sys
+          def pairs(items):
+              result = {}
+              for key, value in items:
+                  if key in result:
+                      raise ValueError(f"duplicate key {key!r}")
+                  result[key] = value
+              return result
+          try:
+              value = json.loads(os.environ["IMAGES"], object_pairs_hook=pairs)
+          except Exception as exc:
+              print(f"::error::invalid images JSON: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+          if not isinstance(value, dict):
+              print("::error::images must be a JSON object", file=sys.stderr)
+              raise SystemExit(1)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("images_enabled=true\n")
+          PY
+          fi
+          service_json=$(ryvn get service "${{ inputs.service_name }}" -o json)
           service_type=$(echo "$service_json" | jq -r '.definition.type')
           echo "service_type=$service_type" >> $GITHUB_OUTPUT
 
@@ -120,7 +156,11 @@ jobs:
       - name: Generate Release Tag
         id: generate-tag
         run: |
-          tag_info=$(ryvn generate-release-tag ${{ inputs.service_name }} --prefix=${{ steps.service-info.outputs.tag_prefix }} -o json --default-bump-minor)
+          generate_args=(generate-release-tag "${{ inputs.service_name }}" "--prefix=${{ steps.service-info.outputs.tag_prefix }}" -o json --default-bump-minor)
+          if [[ "${{ steps.service-info.outputs.images_enabled }}" == "true" ]]; then
+            generate_args+=(--no-path-filter)
+          fi
+          tag_info=$(ryvn "${generate_args[@]}")
 
           version=$(echo "$tag_info" | jq -r '.version')
           new_tag=$(echo "$tag_info" | jq -r '.tag')
@@ -154,6 +194,7 @@ jobs:
           ryvn_org_id: ${{ inputs.ryvn_org_id }}
           ryvn_cli_version: ${{ inputs.ryvn_cli_version }}
           build_secrets: ${{ secrets.BUILD_SECRETS }}
+          images: ${{ inputs.images }}
 
       - name: Create Ryvn Release
         if: |
