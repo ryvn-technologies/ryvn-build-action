@@ -709,7 +709,18 @@ runs:
         chart_status=0
         completed_pid=""
         first_status=0
-        if wait -n -p completed_pid "$bake_pid" "$chart_pid"; then
+        # `wait -n -p` is unavailable in the Bash 3.2 used by local macOS tests.
+        while [[ -z "$completed_pid" ]]; do
+          running_pids="$(jobs -pr)"
+          if [[ $'\n'"$running_pids"$'\n' != *$'\n'"$bake_pid"$'\n'* ]]; then
+            completed_pid="$bake_pid"
+          elif [[ $'\n'"$running_pids"$'\n' != *$'\n'"$chart_pid"$'\n'* ]]; then
+            completed_pid="$chart_pid"
+          else
+            sleep 0.05
+          fi
+        done
+        if wait "$completed_pid"; then
           first_status=0
         else
           first_status=$?
