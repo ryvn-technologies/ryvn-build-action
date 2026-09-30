@@ -682,7 +682,7 @@ runs:
         done < <(jq -r '.targets[] | .context, (.dockerfile | sub("/[^/]*$"; ""))' "$WORKSPACE/images.json" | sort -u)
         (
           child_pid=""
-          trap 'kill "$child_pid" 2>/dev/null || true' INT TERM
+          trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; exit 143' INT TERM
           echo "[$(date -u +%FT%T.%3NZ)] image bake started"
           status=0
           docker buildx bake "${allow_args[@]}" --file "$WORKSPACE/bake.json" --metadata-file "$WORKSPACE/bake-metadata.json" --progress plain &
@@ -694,7 +694,7 @@ runs:
         bake_pid=$!
         (
           child_pid=""
-          trap 'kill "$child_pid" 2>/dev/null || true' INT TERM
+          trap 'kill "$child_pid" 2>/dev/null || true; wait "$child_pid" 2>/dev/null || true; exit 143' INT TERM
           echo "[$(date -u +%FT%T.%3NZ)] chart packaging started" >&2
           status=0
           ryvn package chart "$CHART_PATH" --version "$VERSION" --destination "$WORKSPACE/chart" -o json &
