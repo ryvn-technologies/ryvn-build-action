@@ -64,6 +64,9 @@ jobs:
   build-and-release:
     name: Build and Release
     runs-on: ${{ fromJSON(inputs.runner) }}
+    concurrency:
+      group: ryvn-release-${{ github.repository }}-${{ inputs.service_name }}-${{ github.ref }}
+      cancel-in-progress: false
 
     env:
       HAS_BUILD_SECRETS: ${{ secrets.BUILD_SECRETS != '' }}
@@ -172,15 +175,44 @@ jobs:
           echo "channel=$channel" >> $GITHUB_OUTPUT
           echo "should_release=$should_release" >> $GITHUB_OUTPUT
 
+      - name: Check existing preview release
+        id: existing-preview
+        if: |
+          github.event_name == 'pull_request' &&
+          steps.generate-tag.outputs.channel != '' &&
+          !contains(github.event.pull_request.title, '[skip-release]')
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          VERSION: ${{ steps.generate-tag.outputs.version }}
+          CHANNEL: ${{ steps.generate-tag.outputs.channel }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if release=$(ryvn get release "$VERSION" -s "$SERVICE_NAME" -o json 2>"$RUNNER_TEMP/preview-release-error"); then
+            if ! jq -e --arg version "$VERSION" --arg sha "$SOURCE_SHA" --arg channel "$CHANNEL" '
+              .version == $version and .commit.sha == $sha and .recalled == false and
+              ((.channels // []) | index($channel) != null)
+            ' <<<"$release" >/dev/null; then
+              echo "::error::Existing preview release does not match this commit and channel, or is recalled."
+              exit 1
+            fi
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Preview release $VERSION already exists; keeping its published artifacts."
+          elif grep -Fxq "Error: release $VERSION not found for service $SERVICE_NAME" "$RUNNER_TEMP/preview-release-error"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/preview-release-error" >&2
+            exit 1
+          fi
+
       - name: Set build environment
-        if: env.HAS_BUILD_SECRETS == 'true' && steps.service-info.outputs.needs_build == 'true'
+        if: env.HAS_BUILD_SECRETS == 'true' && steps.service-info.outputs.needs_build == 'true' && steps.existing-preview.outputs.exists != 'true'
         run: echo "$BUILD_SECRETS" >> $GITHUB_ENV
         env:
           BUILD_SECRETS: ${{ secrets.BUILD_SECRETS }}
 
       - name: Build and Push
         id: build
-        if: steps.service-info.outputs.needs_build == 'true'
+        if: steps.service-info.outputs.needs_build == 'true' && steps.existing-preview.outputs.exists != 'true'
         uses: ryvn-technologies/ryvn-build-action@v2
         with:
           service_name: ${{ inputs.service_name }}
@@ -198,6 +230,7 @@ jobs:
 
       - name: Create Ryvn Release
         if: |
+          steps.existing-preview.outputs.exists != 'true' &&
           steps.generate-tag.outputs.channel != '' &&
           !contains(github.event.head_commit.message, '[skip-release]') &&
           !contains(github.event.pull_request.title, '[skip-release]')

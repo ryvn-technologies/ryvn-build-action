@@ -55,6 +55,11 @@ The reusable workflow inherits the `GITHUB_TOKEN` permissions granted by the cal
 
 The reusable workflow also accepts an optional `tag_prefix` input (e.g. `gcp-gke@`) that overrides the tag prefix derived from the service definition — needed for terraform services using a public module `source` in a repository that releases several services.
 
+Release jobs serialize per repository, service, and ref. On pull requests, a preview
+version already published for the same head commit and channel is reused before
+building or pushing artifacts. Recalled releases, mismatched commits/channels, and
+lookup failures stop publication; existing releases are never overwritten.
+
 ## Inputs
 
 | Name                 | Description                                               | Required | Default |
