@@ -77,6 +77,9 @@ lookup failures stop publication; existing releases are never overwritten.
 | `nixpacks_pkgs`      | Additional Nix packages to install in the environment     | No       | `""`    |
 | `nixpacks_apt`       | Additional Apt packages to install in the environment     | No       | `""`    |
 | `nixpacks_cache`     | Use the Nixpacks build cache                              | No       | `true`  |
+| `render_values_files` | Helm values files for rendering the release inventory, one checkout-relative path per line (`ryvn create release-file -f`) | No | `""` |
+| `render_set_values`   | Helm values for rendering the release inventory, one `key=value` per line (`ryvn create release-file --set`) | No | `""` |
+| `render_namespace` | Namespace the chart is rendered in for the release inventory (`ryvn create release-file --namespace`) | No | `default` |
 
 ## Outputs
 
@@ -181,6 +184,36 @@ jobs:
 
 An existing `<service>-release.ryvn.yaml` beside the build can contribute dependencies, migrations, and labels to the generated inventory. It must not define `artifacts`: the build generates them, and the command fails if it does.
 
+#### Charts that do not render with their default values
+
+The release inventory is produced by rendering the packaged chart (`ryvn create
+release-file`). By default that render uses the chart's own `values.yaml` and
+the namespace `default`, which fails for charts that require a value (a cluster
+name, a disk ID) or assert the namespace they are installed in. Pass the values
+and namespace the render needs; they affect only the inventory render, never
+the packaged or published chart:
+
+```yaml
+- name: Build and Push Helm Chart
+  uses: ryvn-technologies/ryvn-build-action@v2
+  with:
+    service_name: my-chart
+    version: 1.0.0
+    render_values_files: |
+      charts/my-chart/values-release.yaml
+    render_set_values: |
+      clusterName=release-render
+      disk.id=placeholder
+    render_namespace: kube-system
+```
+
+Each non-blank line of `render_values_files` becomes a `-f` flag and each line of
+`render_set_values` a `--set` flag, in order; paths are relative to the checkout.
+The same three inputs are accepted by the reusable workflow
+(`.github/workflows/release.yml`) and forwarded unchanged. Values used only to
+satisfy the render still shape which images the inventory discovers, so pass the
+values you deploy with where conditional templates select images.
+
 ### Building images alongside a Helm chart (managed GAR)
 
 Pass `images` as a JSON object when a source-built `helm-chart.v1` service is
@@ -268,7 +301,7 @@ The action is orchestration only: runner setup, Buildx, `docker/build-push-actio
    - Otherwise uses standard Docker build with Dockerfile
 4. Unless `build_only`, routes the registry login on `definition.registry`: the managed `ryvn-registry` reads its type (`ryvn get registry ryvn-registry -o json` — ECR keeps the AWS role path); every customer registry goes straight to brokered login without a registry read — `create registry-config` resolves it. See Registries below.
 5. Container services: `docker/build-push-action` builds (and pushes) the image; unless `build_only`, `ryvn describe image <ref> --service <name> -o artifact` resolves the pushed tag in the registry and records its digest and exposed ports. When the build step reported a push digest (Buildx does, Nixpacks does not) it is passed as `--digest`, and the CLI inspects that exact content (`repo@digest`) so the artifact describes what this run pushed even if the tag has since been moved by another push; the current tag is not compared against it. Without a push digest the tag is resolved as it is at that moment. The image must resolve; only exposed-port metadata is best effort. The reusable workflow passes `--artifacts-file <build_artifacts> --inventory` when creating the release, so the digest-pinned image is the release's primary artifact.
-6. Helm services: `ryvn package chart <chartPath> --version <v> -o json` packages locally; `ryvn push chart <pkg> --service <name> -o artifact` resolves the service's chart destination and publishes; `ryvn create release-file` renders the packaged chart, discovers every image reference, resolves all image digests, and writes the release artifact inventory.
+6. Helm services: `ryvn package chart <chartPath> --version <v> -o json` packages locally; `ryvn push chart <pkg> --service <name> -o artifact` resolves the service's chart destination and publishes; `ryvn create release-file` renders the packaged chart (with `render_values_files`, `render_set_values`, and `render_namespace` forwarded as `-f`, `--set`, and `--namespace`), discovers every image reference, resolves all image digests, and writes the release artifact inventory.
 7. A service produces at most one artifact array (`describe image` or `push chart`; `[]` for a `build_only` run), passed through as the `build_artifacts` output. Helm services additionally produce the `release_file` output for `ryvn create release -f`.
 
 Buildable service types are `web-server.v1`, `job.v1` and `helm-chart.v1`.

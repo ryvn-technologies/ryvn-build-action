@@ -80,6 +80,18 @@ inputs:
     description: "Docker BuildKit secrets (KEY=VALUE per line). Mounted via --secret so they don't leak into image layers. Users access them with RUN --mount=type=secret,id=KEY in their Dockerfile."
     required: false
     default: ""
+  render_values_files:
+    description: "Helm values files used to render a helm-chart.v1 service into its release inventory, one checkout-relative path per line (each becomes `ryvn create release-file -f`). Rendering only: packaging and publishing are unaffected."
+    required: false
+    default: ""
+  render_set_values:
+    description: "Helm values used to render a helm-chart.v1 service into its release inventory, one key=value per line (each becomes `ryvn create release-file --set`). Rendering only: packaging and publishing are unaffected."
+    required: false
+    default: ""
+  render_namespace:
+    description: "Namespace the chart is rendered in for its release inventory (`ryvn create release-file --namespace`), for charts that check where they are installed. Defaults to the CLI's `default`."
+    required: false
+    default: ""
 
 outputs:
   build_artifacts:
@@ -847,6 +859,9 @@ runs:
         CHART_PACKAGE: ${{ steps.helm_package.outputs.chart_package || steps.images_build.outputs.chart_package }}
         REGISTRY_PROVIDER: ${{ steps.service.outputs.registry_provider }}
         IMAGES_ENABLED: ${{ steps.images.outputs.enabled }}
+        RENDER_VALUES_FILES: ${{ inputs.render_values_files }}
+        RENDER_SET_VALUES: ${{ inputs.render_set_values }}
+        RENDER_NAMESPACE: ${{ inputs.render_namespace }}
       run: |
         set -euo pipefail
         artifacts_file="$WORKSPACE/artifacts.json"
@@ -859,6 +874,20 @@ runs:
           artifacts_file="$WORKSPACE/release-artifacts.json"
         fi
         args=(create release-file "$SERVICE_NAME" "$VERSION" --chart "$CHART_PACKAGE" --artifacts-file "$artifacts_file" --output-file "$WORKSPACE/release.yaml")
+        # Render inputs are forwarded as-is, one flag per non-blank line
+        # (`read` without IFS= trims the surrounding whitespace). The CLI
+        # reports a missing values file or malformed --set itself.
+        while read -r values_file; do
+          [[ -z "$values_file" ]] && continue
+          args+=(-f "$values_file")
+        done <<< "$RENDER_VALUES_FILES"
+        while read -r set_value; do
+          [[ -z "$set_value" ]] && continue
+          args+=(--set "$set_value")
+        done <<< "$RENDER_SET_VALUES"
+        if [[ -n "$RENDER_NAMESPACE" ]]; then
+          args+=(--namespace "$RENDER_NAMESPACE")
+        fi
         if [[ "$REGISTRY_PROVIDER" == "ecr" ]]; then
           args+=(--registry-config "${DOCKER_CONFIG:-$HOME/.docker}/config.json")
         fi

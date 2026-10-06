@@ -48,6 +48,21 @@ on:
         required: false
         type: string
         default: ""
+      render_values_files:
+        description: "Helm values files used to render a helm-chart.v1 service into its release inventory, one checkout-relative path per line (each becomes `ryvn create release-file -f`). Rendering only: packaging and publishing are unaffected."
+        required: false
+        type: string
+        default: ""
+      render_set_values:
+        description: "Helm values used to render a helm-chart.v1 service into its release inventory, one key=value per line (each becomes `ryvn create release-file --set`). Rendering only: packaging and publishing are unaffected."
+        required: false
+        type: string
+        default: ""
+      render_namespace:
+        description: "Namespace the chart is rendered in for its release inventory (`ryvn create release-file --namespace`), for charts that check where they are installed. Defaults to the CLI's `default`."
+        required: false
+        type: string
+        default: ""
     secrets:
       # Optional since keyless CI auth: with `id-token: write` the CLI
       # authenticates using the job's GitHub OIDC token and only falls back to
@@ -227,6 +242,9 @@ jobs:
           ryvn_cli_version: ${{ inputs.ryvn_cli_version }}
           build_secrets: ${{ secrets.BUILD_SECRETS }}
           images: ${{ inputs.images }}
+          render_values_files: ${{ inputs.render_values_files }}
+          render_set_values: ${{ inputs.render_set_values }}
+          render_namespace: ${{ inputs.render_namespace }}
 
       - name: Create Ryvn Release
         if: |
