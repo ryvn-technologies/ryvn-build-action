@@ -63,6 +63,11 @@ on:
         required: false
         type: string
         default: ""
+      ghcr_login:
+        description: "Log in to ghcr.io with the job's GITHUB_TOKEN before the build, so a Dockerfile can pull a private ghcr.io base image. The caller job must grant `packages: read`. The credential is seeded into the Docker config the build uses and removed with it."
+        required: false
+        type: boolean
+        default: false
     secrets:
       # Optional since keyless CI auth: with `id-token: write` the CLI
       # authenticates using the job's GitHub OIDC token and only falls back to
@@ -224,6 +229,18 @@ jobs:
         run: echo "$BUILD_SECRETS" >> $GITHUB_ENV
         env:
           BUILD_SECRETS: ${{ secrets.BUILD_SECRETS }}
+
+      # Runs before the build so a private ghcr.io base image can be pulled.
+      # ryvn create registry-config copies this login into the Docker config the
+      # build uses, so the credential reaches the FROM pull on both publish and
+      # build-only runs, then is removed with that disposable config.
+      - name: Log in to ghcr.io for private base images
+        if: inputs.ghcr_login && steps.service-info.outputs.needs_build == 'true' && steps.existing-preview.outputs.exists != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push
         id: build
