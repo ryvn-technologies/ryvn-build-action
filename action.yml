@@ -104,6 +104,23 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # GitHub masks the build_secrets input only as a whole, so mask each value
+    # before any step can print it on its own.
+    - name: Mask build secret values
+      if: inputs.build_secrets != ''
+      shell: bash
+      env:
+        BUILD_SECRETS: ${{ inputs.build_secrets }}
+      run: |
+        while IFS= read -r secret_line; do
+          [[ -z "$secret_line" || "$secret_line" != *=* ]] && continue
+          # The runner decodes %25, %0D and %0A before registering the mask.
+          value=${secret_line#*=}
+          value=${value//'%'/%25}
+          value=${value//$'\r'/%0D}
+          echo "::add-mask::$value"
+        done <<< "$BUILD_SECRETS"
+
     # Registry login, chart packaging/publishing and image inspection are CLI
     # commands, so the default is the oldest release that carries them. An
     # older explicit pin fails at the first missing command.

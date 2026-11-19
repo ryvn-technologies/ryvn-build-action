@@ -221,7 +221,18 @@ jobs:
 
       - name: Set build environment
         if: env.HAS_BUILD_SECRETS == 'true' && steps.service-info.outputs.needs_build == 'true' && steps.existing-preview.outputs.exists != 'true'
-        run: echo "$BUILD_SECRETS" >> $GITHUB_ENV
+        # GitHub masks BUILD_SECRETS only as a whole, so mask each value before
+        # it becomes an environment variable that later steps print.
+        run: |
+          while IFS= read -r secret_line; do
+            [[ -z "$secret_line" || "$secret_line" != *=* ]] && continue
+            # The runner decodes %25, %0D and %0A before registering the mask.
+            value=${secret_line#*=}
+            value=${value//'%'/%25}
+            value=${value//$'\r'/%0D}
+            echo "::add-mask::$value"
+          done <<< "$BUILD_SECRETS"
+          echo "$BUILD_SECRETS" >> "$GITHUB_ENV"
         env:
           BUILD_SECRETS: ${{ secrets.BUILD_SECRETS }}
 
