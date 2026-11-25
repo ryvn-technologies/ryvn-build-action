@@ -25,7 +25,7 @@ inputs:
     required: false
     default: ""
   ryvn_cli_version:
-    description: "Ryvn CLI release to install; must be v1.294.0 or newer (all-provider registry-config, repository preflight, chart and image commands, artifact digests). Defaults to v1.294.0 (optional)"
+    description: "Ryvn CLI release to install; must be v1.294.0 or newer (all-provider registry-config, repository preflight, chart and image commands, artifact digests). Defaults to v1.479.0, the first release whose generate-release-tag honors build.filter.paths (optional)"
     required: false
     default: ""
   ryvn_api_url:
@@ -127,7 +127,7 @@ runs:
     - name: Install Ryvn CLI
       uses: ryvn-technologies/install-ryvn-cli@v1.0.0
       env:
-        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.294.0' }}
+        RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.479.0' }}
 
     # One private directory per invocation for every transient file (service
     # and registry metadata, registry config, chart package, artifacts) so

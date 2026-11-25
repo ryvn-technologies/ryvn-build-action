@@ -49,7 +49,7 @@ jobs:
 
 Set `ryvn_org_id` when more than one Ryvn organization trusts the same GitHub repository. Static credentials keep working unchanged for CI systems without OIDC and during the rollout.
 
-Keyless auth needs a Ryvn CLI with the OIDC credential source; there is no separate login step — every `ryvn` invocation exchanges the job's GitHub OIDC token on its own (cached within the process). Both the action and the reusable workflow (`.github/workflows/release.yml`) install the CLI and accept a `ryvn_cli_version` input (e.g. `v1.294.0`) to pin a release; when unset the action installs `v1.294.0`, the oldest release carrying the publishing commands for every registry provider (`create/delete registry-config` with brokered credentials, `package chart`, `push chart`, `create release-file`, `describe image`), the destination-repository preflight, and the image digest in `describe image -o artifact`. An older explicit pin fails at the first missing command with the CLI's own `unknown command` error. A CLI that predates keyless auth ignores `id-token: write` and uses the static credentials if set; otherwise its first `ryvn` call fails on missing credentials.
+Keyless auth needs a Ryvn CLI with the OIDC credential source; there is no separate login step — every `ryvn` invocation exchanges the job's GitHub OIDC token on its own (cached within the process). Both the action and the reusable workflow (`.github/workflows/release.yml`) install the CLI and accept a `ryvn_cli_version` input (e.g. `v1.294.0`) to pin a release; when unset the action installs `v1.479.0`, the first release whose `generate-release-tag` honors `build.filter.paths`. Explicit pins must be `v1.294.0` or newer, the oldest release carrying the publishing commands for every registry provider (`create/delete registry-config` with brokered credentials, `package chart`, `push chart`, `create release-file`, `describe image`), the destination-repository preflight, and the image digest in `describe image -o artifact`. An older explicit pin fails at the first missing command with the CLI's own `unknown command` error. A CLI that predates keyless auth ignores `id-token: write` and uses the static credentials if set; otherwise its first `ryvn` call fails on missing credentials.
 
 The reusable workflow inherits the `GITHUB_TOKEN` permissions granted by the calling job, so the caller decides the auth mode: `contents: write` plus `id-token: write` for keyless auth, or `contents: write` alone to force the static `RYVN_CLIENT_ID`/`RYVN_CLIENT_SECRET` credentials (e.g. for services whose spec has no GitHub `repo` locator, such as public terraform module `source`s).
 
@@ -70,7 +70,7 @@ lookup failures stop publication; existing releases are never overwritten.
 | `ryvn_client_id`     | Ryvn Client ID (static credentials; see Authentication)   | No       |         |
 | `ryvn_client_secret` | Ryvn Client Secret (static credentials; see Authentication)| No       |         |
 | `ryvn_org_id`        | Ryvn organization ID, for repositories trusted by more than one organization | No |   |
-| `ryvn_cli_version`   | Ryvn CLI release to install (must be `v1.294.0` or newer) | No | `v1.294.0` |
+| `ryvn_cli_version`   | Ryvn CLI release to install (must be `v1.294.0` or newer) | No | `v1.479.0` |
 | `build_args`         | Build arguments to pass to the Docker build               | No       |         |
 | `images`             | JSON map of named Dockerfile image targets built alongside a managed-GAR Helm chart | No | `{}` |
 | `use_nixpacks`       | Use Nixpacks to build Docker images instead of Dockerfile | No       | `false` |
@@ -293,7 +293,7 @@ new input.
 
 The action is orchestration only: runner setup, Buildx, `docker/build-push-action`, and step outputs. Everything that needs to know about Ryvn registries, Helm charts, or release artifacts is a Ryvn CLI command, so the same flow works from any CI system.
 
-1. Installs the Ryvn CLI (`ryvn_cli_version`, default `v1.294.0`). Creates a private per-invocation workspace under `runner.temp` for every transient file (service and registry metadata, registry config, chart package, artifacts), so several invocations in one job never share state and nothing is written into the checkout; the `always()` cleanup step removes it.
+1. Installs the Ryvn CLI (`ryvn_cli_version`, default `v1.479.0`). Creates a private per-invocation workspace under `runner.temp` for every transient file (service and registry metadata, registry config, chart package, artifacts), so several invocations in one job never share state and nothing is written into the checkout; the `always()` cleanup step removes it.
 2. `ryvn get service <name> -o json` for the service definition; ordinary fields (`type`, `build.*`, `image`) become step outputs and build inputs. The `ryvn_api_url`/`ryvn_auth_url`/`ryvn_org_id`/`ryvn_project_id` inputs apply to the action's own CLI steps only (falling back to the job's `RYVN_*` environment); they are not exported to later steps.
 3. Detects the build method:
    - If `buildpack: "nixpack"` is set in service definition, uses Nixpacks with the service's build command

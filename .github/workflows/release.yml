@@ -34,7 +34,7 @@ on:
         type: string
         default: ""
       ryvn_cli_version:
-        description: "Ryvn CLI release to install (e.g. v1.294.0). Defaults to v1.294.0, the oldest release with the publishing commands and artifact digests for every registry provider; keyless auth needs a CLI with the OIDC credential source"
+        description: "Ryvn CLI release to install (e.g. v1.479.0); must be v1.294.0 or newer, the oldest release with the publishing commands and artifact digests for every registry provider. Defaults to v1.479.0, the first release whose generate-release-tag honors build.filter.paths; keyless auth needs a CLI with the OIDC credential source"
         required: false
         type: string
         default: ""
@@ -101,7 +101,7 @@ jobs:
       - name: Install Ryvn CLI
         uses: ryvn-technologies/install-ryvn-cli@v1.0.0
         env:
-          RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.294.0' }}
+          RYVN_CLI_VERSION: ${{ inputs.ryvn_cli_version || 'v1.479.0' }}
 
       - name: Get Service Info
         id: service-info
