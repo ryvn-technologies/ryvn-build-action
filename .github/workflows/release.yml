@@ -63,6 +63,16 @@ on:
         required: false
         type: string
         default: ""
+      build_args:
+        description: "Docker build arguments, forwarded unchanged to the action's `build_args` input. When set, they replace the `dockerBuildArgs` of the service definition and of every named image target. Empty (the default) keeps those."
+        required: false
+        type: string
+        default: ""
+      blobless_checkout:
+        description: "Check out with the partial clone filter `blob:none`: every commit, tree and tag, which is all release tagging reads, but file contents only for the checked-out commit. False (the default) fetches every blob."
+        required: false
+        type: boolean
+        default: false
     secrets:
       # Optional since keyless CI auth: with `id-token: write` the CLI
       # authenticates using the job's GitHub OIDC token and only falls back to
@@ -97,6 +107,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          filter: ${{ inputs.blobless_checkout && 'blob:none' || '' }}
 
       - name: Install Ryvn CLI
         uses: ryvn-technologies/install-ryvn-cli@v1.0.0
@@ -252,6 +263,7 @@ jobs:
           ryvn_org_id: ${{ inputs.ryvn_org_id }}
           ryvn_cli_version: ${{ inputs.ryvn_cli_version }}
           build_secrets: ${{ secrets.BUILD_SECRETS }}
+          build_args: ${{ inputs.build_args }}
           images: ${{ inputs.images }}
           render_values_files: ${{ inputs.render_values_files }}
           render_set_values: ${{ inputs.render_set_values }}

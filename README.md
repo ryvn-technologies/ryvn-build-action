@@ -55,6 +55,8 @@ The reusable workflow inherits the `GITHUB_TOKEN` permissions granted by the cal
 
 The reusable workflow also accepts an optional `tag_prefix` input (e.g. `gcp-gke@`) that overrides the tag prefix derived from the service definition — needed for terraform services using a public module `source` in a repository that releases several services.
 
+Two more optional reusable-workflow inputs keep the behavior above by default. `build_args` is forwarded unchanged to the action's `build_args`, which replaces the `dockerBuildArgs` of the service definition and of every named image target; the action passes it on as a single line, so give one `KEY=VALUE`. `blobless_checkout: true` checks out with the partial clone filter `blob:none`: it still fetches every commit, tree and tag, which is all release tagging reads, and downloads file contents only for the checked-out commit. Filters that also drop trees are not offered, because release tagging lists each commit's changed files.
+
 Release jobs serialize per repository, service, and ref. On pull requests, a preview
 version already published for the same head commit and channel is reused before
 building or pushing artifacts. Recalled releases, mismatched commits/channels, and
